@@ -6,9 +6,9 @@ const https = require('https');
 // CẤU HÌNH
 // ======================
 const BASE = "https://autobcr.com";
-const LOGIN_URL = BASE + "/login";
-const LOBBY_URL = BASE + "/wm/lobby";
-const GETNEWRESULT_URL = BASE + "/baccarat/getnewresult";
+const LOGIN_URL = `${BASE}/login`;
+const LOBBY_URL = `${BASE}/wm/lobby`;
+const GETNEWRESULT_URL = `${BASE}/baccarat/getnewresult`;
 
 const USERNAME = "bucumh";
 const PASSWORD = "123456";
@@ -17,7 +17,7 @@ const agent = new https.Agent({ rejectUnauthorized: false });
 let cookieJar = '';
 let baccaratData = [];
 let lastUpdate = null;
-let predictionData = [];
+let historicalData = {}; // Lưu lịch sử cho từng bàn
 
 // ======================
 // SESSION AXIOS
@@ -33,58 +33,31 @@ const session = axios.create({
     }
 });
 
-session.interceptors.request.use(function(config) {
+// Interceptor lưu cookie
+session.interceptors.request.use(config => {
     if (cookieJar) config.headers.Cookie = cookieJar;
     return config;
 });
 
-session.interceptors.response.use(function(res) {
-    var setCookie = res.headers['set-cookie'];
+session.interceptors.response.use(res => {
+    const setCookie = res.headers['set-cookie'];
     if (setCookie) {
-        for (var i = 0; i < setCookie.length; i++) {
-            var cookie = setCookie[i];
-            var parts = cookie.split(';')[0].split('=');
-            var name = parts[0];
-            var value = parts[1];
-            if (cookieJar.indexOf(name + '=') !== -1) {
-                cookieJar = cookieJar.replace(new RegExp(name + '=[^;]+;?'), '');
+        for (const cookie of setCookie) {
+            const [name, value] = cookie.split(';')[0].split('=');
+            if (cookieJar.includes(`${name}=`)) {
+                cookieJar = cookieJar.replace(new RegExp(`${name}=[^;]+;?`), '');
             }
-            cookieJar += name + '=' + value + '; ';
+            cookieJar += `${name}=${value}; `;
         }
     }
     return res;
 });
 
 // ======================
-// HÀM TÁCH CHUỖI RESULT - QUAN TRỌNG
-// ======================
-function extractRounds(resultStr) {
-    if (!resultStr || resultStr === '') return [];
-    
-    // TH1: Có dấu phẩy: "B,P,B,P"
-    if (resultStr.indexOf(',') !== -1) {
-        return resultStr.split(',').filter(function(r) {
-            var trimmed = r.trim();
-            return trimmed === 'B' || trimmed === 'P' || trimmed === 'T';
-        });
-    }
-    
-    // TH2: Không có dấu phẩy: "BPPPPPPPP" -> tách từng ký tự
-    var rounds = [];
-    for (var i = 0; i < resultStr.length; i++) {
-        var char = resultStr[i];
-        if (char === 'B' || char === 'P' || char === 'T') {
-            rounds.push(char);
-        }
-    }
-    return rounds;
-}
-
-// ======================
 // LẤY CSRF TOKEN
 // ======================
 function getCsrfToken(html) {
-    var match = html.match(/<meta\s+name="csrf-token"\s+content="([^"]+)"/);
+    const match = html.match(/<meta\s+name="csrf-token"\s+content="([^"]+)"/);
     return match ? match[1] : null;
 }
 
@@ -93,15 +66,22 @@ function getCsrfToken(html) {
 // ======================
 async function login() {
     try {
-        var getResp = await session.get(LOGIN_URL);
-        var token = getCsrfToken(getResp.data);
-        var formData = new URLSearchParams();
+        const getResp = await session.get(LOGIN_URL);
+        const token = getCsrfToken(getResp.data);
+        
+        const formData = new URLSearchParams();
         formData.append('username', USERNAME);
         formData.append('password', PASSWORD);
         formData.append('_token', token);
         formData.append('action', 'Login');
-        var headers = { 'Referer': LOGIN_URL, 'Origin': BASE, 'Content-Type': 'application/x-www-form-urlencoded' };
-        var loginResp = await session.post(LOGIN_URL, formData.toString(), { headers: headers });
+        
+        const headers = {
+            'Referer': LOGIN_URL,
+            'Origin': BASE,
+            'Content-Type': 'application/x-www-form-urlencoded'
+        };
+        
+        const loginResp = await session.post(LOGIN_URL, formData.toString(), { headers });
         return loginResp.status === 200;
     } catch (error) {
         console.error('Login error:', error.message);
@@ -123,42 +103,233 @@ async function goToLobby() {
 }
 
 // ======================
+// PHÂN TÍCH PATTERN
+// ======================
+function analyzePattern(history) {
+    if (!history || history.length < 5) {
+        return {
+            pattern: 'Chưa đủ dữ liệu',
+            confidence: 0,
+            suggestion: 'Chờ thêm kết quả',
+            nextPrediction: 'N/A'
+        };
+    }
+
+    // Chuyển đổi kết quả thành dạng chuỗi: B (Banker), P (Player), T (Tie)
+    const results = history.map(r => {
+        if (r.includes('Banker') || r.includes('BANKER')) return 'B';
+        if (r.includes('Player') || r.includes('PLAYER')) return 'P';
+        return 'T';
+    });
+
+    // 1. PHÂN TÍCH CẦU ĐƠN (Single Pattern)
+    let pattern = '';
+    let confidence = 0;
+    let nextPrediction = '';
+    let suggestion = '';
+
+    // Kiểm tra cầu 1-1 (Alternating)
+    let isAlternating = true;
+    for (let i = 1; i < results.length; i++) {
+        if (results[i] === results[i-1]) {
+            isAlternating = false;
+            break;
+        }
+    }
+    if (isAlternating && results.length >= 4) {
+        pattern = 'Cầu 1-1 (Đan xen)';
+        confidence = 75;
+        nextPrediction = results[results.length - 1] === 'B' ? 'P' : 'B';
+        suggestion = 'THEO - Cầu đan xen đang mạnh';
+    }
+
+    // Kiểm tra cầu 2-2 (Double)
+    if (!pattern) {
+        let isDouble = true;
+        let pairs = [];
+        for (let i = 0; i < results.length - 1; i += 2) {
+            if (results[i] !== results[i+1]) {
+                isDouble = false;
+                break;
+            }
+            pairs.push(results[i]);
+        }
+        if (isDouble && results.length >= 4) {
+            pattern = 'Cầu 2-2 (Kép đôi)';
+            confidence = 80;
+            const lastPair = results[results.length - 1];
+            nextPrediction = lastPair === 'B' ? 'B' : 'P';
+            suggestion = 'THEO - Cầu kép đôi ổn định';
+        }
+    }
+
+    // Kiểm tra cầu 3-2 (Fibonacci)
+    if (!pattern) {
+        let counts = { B: 0, P: 0, T: 0 };
+        results.forEach(r => { if (r !== 'T') counts[r]++; });
+        
+        const total = results.filter(r => r !== 'T').length;
+        const bRatio = counts.B / total;
+        const pRatio = counts.P / total;
+        
+        if (Math.abs(bRatio - pRatio) > 0.3) {
+            pattern = 'Cầu lệch (Ưu thế)';
+            confidence = 70;
+            if (bRatio > pRatio) {
+                nextPrediction = 'B';
+                suggestion = 'THEO - Banker đang chiếm ưu thế';
+            } else {
+                nextPrediction = 'P';
+                suggestion = 'THEO - Player đang chiếm ưu thế';
+            }
+        }
+    }
+
+    // Kiểm tra cầu vượt (Streak)
+    if (!pattern) {
+        let currentStreak = 1;
+        let maxStreak = 1;
+        let streakResult = results[0];
+        
+        for (let i = 1; i < results.length; i++) {
+            if (results[i] === results[i-1]) {
+                currentStreak++;
+                if (currentStreak > maxStreak) {
+                    maxStreak = currentStreak;
+                    streakResult = results[i];
+                }
+            } else {
+                currentStreak = 1;
+            }
+        }
+        
+        if (maxStreak >= 3) {
+            pattern = `Cầu vượt (${maxStreak} ${streakResult === 'B' ? 'Banker' : 'Player'})`;
+            confidence = 85;
+            nextPrediction = streakResult;
+            suggestion = 'THEO - Cầu vượt mạnh, tiếp tục theo đà';
+        }
+    }
+
+    // Nếu không có pattern rõ ràng
+    if (!pattern) {
+        pattern = 'Cầu hỗn hợp (Không rõ ràng)';
+        confidence = 50;
+        // Dùng phương pháp đơn giản: chọn bên nào có xác suất cao hơn
+        const counts = { B: 0, P: 0, T: 0 };
+        results.forEach(r => { if (r !== 'T') counts[r]++; });
+        const total = results.filter(r => r !== 'T').length;
+        
+        if (counts.B > counts.P) {
+            nextPrediction = 'B';
+            suggestion = 'BẺ - Cầu đang phức tạp, cân nhắc Banker';
+        } else if (counts.P > counts.B) {
+            nextPrediction = 'P';
+            suggestion = 'BẺ - Cầu đang phức tạp, cân nhắc Player';
+        } else {
+            nextPrediction = 'B';
+            suggestion = 'BẺ - Cầu cân bằng, chọn Banker (tỷ lệ thắng cao hơn)';
+        }
+    }
+
+    return {
+        pattern,
+        confidence: Math.min(confidence, 95),
+        suggestion,
+        nextPrediction,
+        lastResults: results.slice(-10).join(' → ')
+    };
+}
+
+// ======================
+// TẠO DỰ ĐOÁN CHO PHIÊN TIẾP THEO
+// ======================
+function generatePrediction(tableName, history) {
+    const analysis = analyzePattern(history);
+    
+    // Lấy phiên hiện tại
+    let currentRound = 0;
+    if (history && history.length > 0) {
+        // Tìm số phiên từ dữ liệu
+        const match = history[history.length - 1].match(/[0-9]+/);
+        if (match) {
+            currentRound = parseInt(match[0]) || 0;
+        }
+    }
+    const nextRound = currentRound + 1;
+
+    // Xác định độ tin cậy dựa trên số lượng mẫu
+    let reliability = 'Thấp';
+    if (history.length >= 20) reliability = 'Cao';
+    else if (history.length >= 10) reliability = 'Trung bình';
+
+    return {
+        tableName: tableName,
+        round: nextRound,
+        prediction: analysis.nextPrediction,
+        confidence: analysis.confidence,
+        pattern: analysis.pattern,
+        suggestion: analysis.suggestion,
+        reliability: reliability,
+        sampleCount: history.length,
+        lastResults: analysis.lastResults || 'Chưa có dữ liệu',
+        timestamp: new Date().toISOString()
+    };
+}
+
+// ======================
 // LẤY KẾT QUẢ BACCARAT
 // ======================
 async function fetchBaccaratData() {
     try {
-        var xsrfToken = '';
-        var xsrfMatch = cookieJar.match(/XSRF-TOKEN=([^;]+)/);
+        let xsrfToken = '';
+        const xsrfMatch = cookieJar.match(/XSRF-TOKEN=([^;]+)/);
         if (xsrfMatch) xsrfToken = decodeURIComponent(xsrfMatch[1]);
-        var headers = {
+        
+        const headers = {
             'Referer': LOBBY_URL,
             'Origin': BASE,
             'X-Requested-With': 'XMLHttpRequest',
             'X-XSRF-TOKEN': xsrfToken,
             'Content-Type': 'application/x-www-form-urlencoded; charset=UTF-8'
         };
-        var formData = new URLSearchParams();
+        
+        const formData = new URLSearchParams();
         formData.append('gameCode', 'ae');
-        var resp = await session.post(GETNEWRESULT_URL, formData.toString(), { headers: headers });
+        
+        const resp = await session.post(GETNEWRESULT_URL, formData.toString(), { headers });
         
         if (resp.data && resp.data.data) {
-            baccaratData = resp.data.data.map(function(item) {
-                var resultStr = item.result || '';
-                var rounds = extractRounds(resultStr);
-                var totalPatterns = rounds.length;
-                
-                console.log('Bàn ' + item.table_name + ': result length=' + resultStr.length + ', patterns=' + totalPatterns);
-                
-                return {
-                    table: item.table_name,
-                    result: item.result,
-                    round: item.round || '',
-                    totalPatterns: totalPatterns
-                };
+            // Cập nhật dữ liệu mới
+            const newData = resp.data.data.map(item => ({
+                table: item.table_name,
+                result: item.result,
+                shoeId: item.shoeId || '',
+                round: item.round || ''
+            }));
+            
+            // Lưu lịch sử cho từng bàn
+            newData.forEach(item => {
+                if (!historicalData[item.table]) {
+                    historicalData[item.table] = [];
+                }
+                // Chỉ thêm nếu chưa có
+                const exists = historicalData[item.table].some(
+                    h => h.result === item.result && h.round === item.round
+                );
+                if (!exists) {
+                    historicalData[item.table].push(item);
+                    // Giữ tối đa 50 kết quả gần nhất
+                    if (historicalData[item.table].length > 50) {
+                        historicalData[item.table] = historicalData[item.table].slice(-50);
+                    }
+                }
             });
+            
+            baccaratData = newData;
             lastUpdate = new Date().toISOString();
-            updatePredictions();
         }
+        
         return baccaratData;
     } catch (error) {
         console.error('Fetch error:', error.message);
@@ -167,442 +338,43 @@ async function fetchBaccaratData() {
 }
 
 // ======================
-// THUẬT TOÁN PHÂN TÍCH
-// ======================
-function analyzeSequence(sequence) {
-    var result = {
-        length: sequence.length,
-        bank: 0,
-        player: 0,
-        tie: 0,
-        consecutiveB: 0,
-        consecutiveP: 0,
-        maxConsecutiveB: 0,
-        maxConsecutiveP: 0,
-        streaks: [],
-        patterns: []
-    };
-    
-    if (sequence.length === 0) return result;
-    
-    var currentStreak = 1;
-    var currentType = sequence[0];
-    
-    for (var i = 0; i < sequence.length; i++) {
-        if (sequence[i] === 'B') result.bank++;
-        else if (sequence[i] === 'P') result.player++;
-        else if (sequence[i] === 'T') result.tie++;
-        
-        if (i > 0) {
-            if (sequence[i] === sequence[i-1]) {
-                currentStreak++;
-                if (sequence[i] === 'B' && currentStreak > result.maxConsecutiveB) {
-                    result.maxConsecutiveB = currentStreak;
-                }
-                if (sequence[i] === 'P' && currentStreak > result.maxConsecutiveP) {
-                    result.maxConsecutiveP = currentStreak;
-                }
-            } else {
-                result.streaks.push({ type: currentType, length: currentStreak });
-                currentStreak = 1;
-                currentType = sequence[i];
-            }
-        }
-    }
-    result.streaks.push({ type: currentType, length: currentStreak });
-    
-    for (var i = 0; i < sequence.length - 3; i++) {
-        var pattern = sequence.slice(i, i + 4);
-        result.patterns.push(pattern.join(''));
-    }
-    
-    return result;
-}
-
-// ======================
-// THUẬT TOÁN DỰ ĐOÁN
-// ======================
-function advancedPrediction(history) {
-    var rounds = extractRounds(history);
-    
-    var analysis = {
-        totalRounds: rounds.length,
-        last10: rounds.slice(-10),
-        last20: rounds.slice(-20),
-        last30: rounds.slice(-30),
-        last50: rounds.slice(-50),
-        all: rounds
-    };
-    
-    var stats10 = analyzeSequence(analysis.last10);
-    var stats20 = analyzeSequence(analysis.last20);
-    var stats30 = analyzeSequence(analysis.last30);
-    var stats50 = analyzeSequence(analysis.last50);
-    var statsAll = analyzeSequence(analysis.all);
-    
-    var predictions = [];
-    var confidenceScores = [];
-    
-    // 1. CẦU BỆT
-    if (rounds.length >= 3) {
-        var last3 = rounds.slice(-3);
-        if (last3.every(function(r) { return r === last3[0]; })) {
-            var strength = 85;
-            if (statsAll.maxConsecutiveB >= 5 || statsAll.maxConsecutiveP >= 5) strength = 90;
-            if (statsAll.maxConsecutiveB >= 8 || statsAll.maxConsecutiveP >= 8) strength = 95;
-            predictions.push({ type: 'Cầu bệt', value: last3[0], strength: strength });
-            confidenceScores.push(strength);
-        }
-    }
-    
-    // 2. CẦU 1-1
-    if (rounds.length >= 6) {
-        var last6 = rounds.slice(-6);
-        var check11 = true;
-        for (var i = 0; i < last6.length - 1; i++) {
-            if (last6[i] === last6[i+1]) {
-                check11 = false;
-                break;
-            }
-        }
-        if (check11) {
-            var strength = 75;
-            var count = 0;
-            for (var i = rounds.length - 1; i > 0; i--) {
-                if (rounds[i] !== rounds[i-1]) count++;
-                else break;
-            }
-            if (count >= 5) strength = 80;
-            if (count >= 7) strength = 85;
-            var lastChar = rounds[rounds.length - 1];
-            var nextPredict = lastChar === 'B' ? 'P' : 'B';
-            predictions.push({ type: 'Cầu 1-1', value: nextPredict, strength: strength });
-            confidenceScores.push(strength);
-        }
-    }
-    
-    // 3. CẦU 2-2
-    if (rounds.length >= 8) {
-        var last8 = rounds.slice(-8);
-        var check22 = true;
-        for (var i = 0; i < last8.length - 2; i += 2) {
-            if (last8[i] !== last8[i+1]) { check22 = false; break; }
-            if (i + 2 < last8.length && last8[i] === last8[i+2]) { check22 = false; break; }
-        }
-        if (check22) {
-            var strength = 70;
-            var lastChar = rounds[rounds.length - 1];
-            var nextPredict = lastChar === 'B' ? 'P' : 'B';
-            predictions.push({ type: 'Cầu 2-2', value: nextPredict, strength: strength });
-            confidenceScores.push(strength);
-        }
-    }
-    
-    // 4. CẦU 3-2
-    if (rounds.length >= 10) {
-        var last10 = rounds.slice(-10);
-        var check32 = false;
-        if (last10.length >= 5) {
-            var last5 = last10.slice(-5);
-            if (last5[0] === last5[1] && last5[1] === last5[2] && 
-                last5[3] === last5[4] && last5[0] !== last5[3]) {
-                check32 = true;
-            }
-        }
-        if (check32) {
-            var strength = 65;
-            var lastChar = rounds[rounds.length - 1];
-            var nextPredict = lastChar === 'B' ? 'P' : 'B';
-            predictions.push({ type: 'Cầu 3-2', value: nextPredict, strength: strength });
-            confidenceScores.push(strength);
-        }
-    }
-    
-    // 5. CẦU 2-3
-    if (rounds.length >= 10) {
-        var last10 = rounds.slice(-10);
-        var check23 = false;
-        if (last10.length >= 5) {
-            var last5 = last10.slice(-5);
-            if (last5[0] === last5[1] && last5[2] === last5[3] && 
-                last5[3] === last5[4] && last5[0] !== last5[2]) {
-                check23 = true;
-            }
-        }
-        if (check23) {
-            var strength = 65;
-            var lastChar = rounds[rounds.length - 1];
-            var nextPredict = lastChar;
-            predictions.push({ type: 'Cầu 2-3', value: nextPredict, strength: strength });
-            confidenceScores.push(strength);
-        }
-    }
-    
-    // 6. THỐNG KÊ XÁC SUẤT
-    if (rounds.length >= 10) {
-        var bCount = statsAll.bank;
-        var pCount = statsAll.player;
-        var total = bCount + pCount;
-        if (total > 0) {
-            var bPercent = (bCount / total * 100);
-            var pPercent = (pCount / total * 100);
-            if (bPercent > 55) {
-                predictions.push({ type: 'Xác suất cao', value: 'B', strength: Math.round(bPercent) });
-                confidenceScores.push(Math.round(bPercent));
-            } else if (pPercent > 55) {
-                predictions.push({ type: 'Xác suất cao', value: 'P', strength: Math.round(pPercent) });
-                confidenceScores.push(Math.round(pPercent));
-            }
-        }
-    }
-    
-    // 7. CHU KỲ
-    var cycleAnalysis = {};
-    if (rounds.length >= 20) {
-        var cycleLength = 5;
-        for (var c = 0; c < rounds.length - cycleLength; c++) {
-            var cycle = rounds.slice(c, c + cycleLength);
-            var key = cycle.join('');
-            if (!cycleAnalysis[key]) cycleAnalysis[key] = 0;
-            cycleAnalysis[key]++;
-        }
-        
-        var maxCycle = '';
-        var maxCount = 0;
-        for (var key in cycleAnalysis) {
-            if (cycleAnalysis[key] > maxCount) {
-                maxCount = cycleAnalysis[key];
-                maxCycle = key;
-            }
-        }
-        
-        if (maxCycle && maxCount >= 2) {
-            var lastCycle = rounds.slice(-cycleLength);
-            if (lastCycle.join('') === maxCycle) {
-                var nextChar = maxCycle[maxCycle.length - 1] === 'B' ? 'P' : 'B';
-                predictions.push({ type: 'Chu kỳ ' + maxCycle, value: nextChar, strength: 70 });
-                confidenceScores.push(70);
-            }
-        }
-    }
-    
-    // 8. BIẾN ĐỘNG
-    if (rounds.length >= 15) {
-        var recent = rounds.slice(-15);
-        var bRecent = recent.filter(function(r) { return r === 'B'; }).length;
-        var pRecent = recent.filter(function(r) { return r === 'P'; }).length;
-        
-        var bRate = bRecent / recent.length * 100;
-        var pRate = pRecent / recent.length * 100;
-        
-        if (bRate > 70) {
-            predictions.push({ type: 'Biến động B', value: 'P', strength: 60 });
-            confidenceScores.push(60);
-        } else if (pRate > 70) {
-            predictions.push({ type: 'Biến động P', value: 'B', strength: 60 });
-            confidenceScores.push(60);
-        }
-    }
-    
-    // 9. TREND
-    if (rounds.length >= 12) {
-        var trend = [];
-        for (var i = 1; i < rounds.length; i++) {
-            if (rounds[i] === rounds[i-1]) trend.push('Same');
-            else trend.push('Change');
-        }
-        
-        var sameCount = trend.filter(function(t) { return t === 'Same'; }).length;
-        var changeCount = trend.filter(function(t) { return t === 'Change'; }).length;
-        
-        if (sameCount / trend.length > 0.7) {
-            var lastChar = rounds[rounds.length - 1];
-            predictions.push({ type: 'Trend Same', value: lastChar, strength: 75 });
-            confidenceScores.push(75);
-        } else if (changeCount / trend.length > 0.7) {
-            var lastChar = rounds[rounds.length - 1];
-            var nextChar = lastChar === 'B' ? 'P' : 'B';
-            predictions.push({ type: 'Trend Change', value: nextChar, strength: 70 });
-            confidenceScores.push(70);
-        }
-    }
-    
-    // 10. CÂN BẰNG
-    if (rounds.length >= 20) {
-        var totalB = statsAll.bank;
-        var totalP = statsAll.player;
-        var diff = Math.abs(totalB - totalP);
-        
-        if (diff > 10) {
-            if (totalB > totalP) {
-                predictions.push({ type: 'Cân bằng B', value: 'P', strength: 65 });
-                confidenceScores.push(65);
-            } else {
-                predictions.push({ type: 'Cân bằng P', value: 'B', strength: 65 });
-                confidenceScores.push(65);
-            }
-        }
-    }
-    
-    // 11. MÔ HÌNH KẾT HỢP
-    if (rounds.length >= 8) {
-        var last4 = rounds.slice(-4);
-        var pattern = last4.join('');
-        var commonPatterns = ['BBBB', 'PPPP', 'BPBP', 'PBPB', 'BBPP', 'PPBB', 'BBBP', 'PPPB'];
-        if (commonPatterns.indexOf(pattern) !== -1) {
-            var nextChar = '';
-            if (pattern === 'BBBB' || pattern === 'PPPP') {
-                nextChar = pattern[0];
-                predictions.push({ type: 'Mô hình ' + pattern, value: nextChar, strength: 80 });
-                confidenceScores.push(80);
-            } else if (pattern === 'BPBP' || pattern === 'PBPB') {
-                nextChar = pattern[pattern.length - 1] === 'B' ? 'P' : 'B';
-                predictions.push({ type: 'Mô hình ' + pattern, value: nextChar, strength: 78 });
-                confidenceScores.push(78);
-            } else if (pattern === 'BBPP' || pattern === 'PPBB') {
-                nextChar = pattern[pattern.length - 1] === 'B' ? 'P' : 'B';
-                predictions.push({ type: 'Mô hình ' + pattern, value: nextChar, strength: 72 });
-                confidenceScores.push(72);
-            }
-        }
-    }
-    
-    // 12. CHUỖI STREAK
-    if (statsAll.streaks.length > 0) {
-        var lastStreak = statsAll.streaks[statsAll.streaks.length - 1];
-        if (lastStreak.length >= 4) {
-            var nextChar = lastStreak.type === 'B' ? 'P' : 'B';
-            predictions.push({ type: 'Break Streak', value: nextChar, strength: 70 });
-            confidenceScores.push(70);
-        }
-        if (lastStreak.length >= 6) {
-            var nextChar = lastStreak.type === 'B' ? 'P' : 'B';
-            predictions.push({ type: 'Break Long Streak', value: nextChar, strength: 85 });
-            confidenceScores.push(85);
-        }
-    }
-    
-    // TỔNG HỢP
-    var finalPrediction = 'B';
-    var finalConfidence = 50;
-    var finalPattern = 'Dự đoán cơ bản';
-    var bestScore = 0;
-    
-    if (predictions.length > 0) {
-        var weightedB = 0, weightedP = 0;
-        
-        for (var i = 0; i < predictions.length; i++) {
-            var pred = predictions[i];
-            if (pred.value === 'B') {
-                weightedB += pred.strength;
-            } else if (pred.value === 'P') {
-                weightedP += pred.strength;
-            }
-        }
-        
-        if (weightedB > weightedP) {
-            finalPrediction = 'B';
-            finalConfidence = Math.round((weightedB / (weightedB + weightedP)) * 100);
-            for (var i = 0; i < predictions.length; i++) {
-                if (predictions[i].value === 'B' && predictions[i].strength > bestScore) {
-                    bestScore = predictions[i].strength;
-                    finalPattern = predictions[i].type;
-                }
-            }
-        } else if (weightedP > weightedB) {
-            finalPrediction = 'P';
-            finalConfidence = Math.round((weightedP / (weightedB + weightedP)) * 100);
-            for (var i = 0; i < predictions.length; i++) {
-                if (predictions[i].value === 'P' && predictions[i].strength > bestScore) {
-                    bestScore = predictions[i].strength;
-                    finalPattern = predictions[i].type;
-                }
-            }
-        } else {
-            var lastChar = rounds.length > 0 ? rounds[rounds.length - 1] : 'B';
-            finalPrediction = lastChar === 'B' ? 'P' : 'B';
-            finalConfidence = 55;
-            finalPattern = 'Bẻ cầu khi hòa';
-        }
-    } else {
-        var lastChar = rounds.length > 0 ? rounds[rounds.length - 1] : 'B';
-        finalPrediction = lastChar === 'B' ? 'P' : 'B';
-        finalConfidence = 50;
-        finalPattern = 'Dự đoán cơ bản';
-    }
-    
-    if (rounds.length > 30) finalConfidence += 5;
-    if (rounds.length > 50) finalConfidence += 5;
-    if (rounds.length > 100) finalConfidence += 5;
-    finalConfidence = Math.min(finalConfidence, 99);
-    
-    return {
-        prediction: finalPrediction,
-        confidence: finalConfidence,
-        pattern: finalPattern
-    };
-}
-
-// ======================
-// CẬP NHẬT DỰ ĐOÁN
-// ======================
-function updatePredictions() {
-    if (!baccaratData || baccaratData.length === 0) return;
-    
-    predictionData = baccaratData.map(function(table) {
-        var analysis = advancedPrediction(table.result);
-        var totalPatterns = table.totalPatterns || 0;
-        var nextRound = totalPatterns + 1;
-        
-        return {
-            table: table.table,
-            round: nextRound,
-            prediction: analysis.prediction,
-            confidence: analysis.confidence,
-            pattern: analysis.pattern
-        };
-    });
-}
-
-// ======================
-// VÒNG LẶP TỰ ĐỘNG
+// VÒNG LẶP TỰ ĐỘNG CẬP NHẬT
 // ======================
 async function autoUpdate() {
     while (true) {
         await fetchBaccaratData();
-        await new Promise(function(resolve) { setTimeout(resolve, 2000); });
+        await new Promise(resolve => setTimeout(resolve, 2000));
     }
 }
 
 // ======================
-// API SERVER
+// KHỞI TẠO API SERVER
 // ======================
-var app = express();
+const app = express();
 
-app.use(function(req, res, next) {
+app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', '*');
     next();
 });
 
-app.get('/api/vanhoa', function(req, res) {
+app.use(express.json());
+
+// API lấy tất cả bàn
+app.get('/api/baccarat', (req, res) => {
     res.json({
         success: true,
-        data: predictionData,
+        data: baccaratData,
         lastUpdate: lastUpdate,
-        total: predictionData.length
+        total: baccaratData.length
     });
 });
 
-app.get('/api/predict/:table', function(req, res) {
-    var tableName = req.params.table;
-    var found = null;
-    for (var i = 0; i < predictionData.length; i++) {
-        if (predictionData[i].table === tableName) {
-            found = predictionData[i];
-            break;
-        }
-    }
+// API lấy theo bàn cụ thể
+app.get('/api/baccarat/:table', (req, res) => {
+    const tableName = req.params.table;
+    const found = baccaratData.find(item => item.table === tableName);
+    
     if (found) {
         res.json({ success: true, data: found });
     } else {
@@ -610,8 +382,124 @@ app.get('/api/predict/:table', function(req, res) {
     }
 });
 
-app.get('/api/baccarat', function(req, res) {
-    res.json({ success: true, data: baccaratData, lastUpdate: lastUpdate, total: baccaratData.length });
+// API lấy kết quả mới nhất
+app.get('/api/latest', (req, res) => {
+    const latest = [...baccaratData].sort((a, b) => {
+        const numA = parseInt(a.table) || 0;
+        const numB = parseInt(b.table) || 0;
+        return numB - numA;
+    });
+    res.json({ success: true, data: latest.slice(0, 10), lastUpdate: lastUpdate });
+});
+
+// ======================
+// API DỰ ĐOÁN
+// ======================
+
+// Dự đoán cho tất cả bàn
+app.get('/api/vanhoa', (req, res) => {
+    try {
+        const predictions = [];
+        const tables = Object.keys(historicalData);
+        
+        tables.forEach(tableName => {
+            const history = historicalData[tableName] || [];
+            if (history.length >= 5) {
+                const prediction = generatePrediction(tableName, history);
+                predictions.push(prediction);
+            }
+        });
+        
+        // Sắp xếp theo độ tin cậy giảm dần
+        predictions.sort((a, b) => b.confidence - a.confidence);
+        
+        res.json({
+            success: true,
+            totalTables: predictions.length,
+            predictions: predictions,
+            timestamp: new Date().toISOString(),
+            message: 'Dự đoán cho tất cả bàn Baccarat'
+        });
+    } catch (error) {
+        console.error('Prediction error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// Dự đoán cho bàn cụ thể
+app.get('/api/vanhoa/:table', (req, res) => {
+    try {
+        const tableName = req.params.table;
+        const history = historicalData[tableName] || [];
+        
+        if (history.length < 5) {
+            return res.json({
+                success: false,
+                message: `Chưa đủ dữ liệu cho bàn ${tableName}. Cần ít nhất 5 kết quả.`,
+                currentData: history.length
+            });
+        }
+        
+        const prediction = generatePrediction(tableName, history);
+        res.json({
+            success: true,
+            prediction: prediction,
+            timestamp: new Date().toISOString()
+        });
+    } catch (error) {
+        console.error('Prediction error:', error);
+        res.status(500).json({
+            success: false,
+            error: error.message
+        });
+    }
+});
+
+// API lịch sử bàn
+app.get('/api/history/:table', (req, res) => {
+    const tableName = req.params.table;
+    const history = historicalData[tableName] || [];
+    
+    res.json({
+        success: true,
+        table: tableName,
+        total: history.length,
+        data: history,
+        timestamp: new Date().toISOString()
+    });
+});
+
+// API thống kê
+app.get('/api/stats', (req, res) => {
+    const stats = {};
+    const tables = Object.keys(historicalData);
+    
+    tables.forEach(tableName => {
+        const history = historicalData[tableName] || [];
+        const results = history.map(h => h.result);
+        const banker = results.filter(r => r.includes('Banker') || r.includes('BANKER')).length;
+        const player = results.filter(r => r.includes('Player') || r.includes('PLAYER')).length;
+        const tie = results.filter(r => r.includes('Tie') || r.includes('TIE') || r.includes('tie')).length;
+        
+        stats[tableName] = {
+            total: results.length,
+            banker: banker,
+            player: player,
+            tie: tie,
+            bankerPercent: results.length > 0 ? ((banker / results.length) * 100).toFixed(1) + '%' : '0%',
+            playerPercent: results.length > 0 ? ((player / results.length) * 100).toFixed(1) + '%' : '0%',
+            tiePercent: results.length > 0 ? ((tie / results.length) * 100).toFixed(1) + '%' : '0%'
+        };
+    });
+    
+    res.json({
+        success: true,
+        stats: stats,
+        timestamp: new Date().toISOString()
+    });
 });
 
 // ======================
@@ -619,10 +507,11 @@ app.get('/api/baccarat', function(req, res) {
 // ======================
 async function start() {
     console.log('========================================');
-    console.log('BACCARAT AI PREDICTION - FIXED');
+    console.log('BACCARAT API SERVER + DỰ ĐOÁN');
     console.log('========================================');
+    
     console.log('[1] Đang đăng nhập...');
-    var loginOk = await login();
+    const loginOk = await login();
     if (!loginOk) {
         console.error('[ERROR] Đăng nhập thất bại!');
         process.exit(1);
@@ -635,24 +524,30 @@ async function start() {
     
     console.log('[3] Lấy dữ liệu lần đầu...');
     await fetchBaccaratData();
-    console.log('[OK] Đã lấy ' + baccaratData.length + ' bàn');
+    console.log(`[OK] Đã lấy ${baccaratData.length} bàn`);
     
-    console.log('\n📊 DỰ ĐOÁN CHI TIẾT:');
-    for (var i = 0; i < predictionData.length; i++) {
-        var item = predictionData[i];
-        console.log('   Bàn ' + item.table + ': Phiên ' + item.round + ' -> ' + item.prediction + ' (Độ tin cậy: ' + item.confidence + '%) - ' + item.pattern);
-    }
+    // Hiển thị danh sách bàn
+    console.log('\n📊 DANH SÁCH BÀN:');
+    baccaratData.forEach(item => {
+        const resultShort = item.result.substring(0, 30) + (item.result.length > 30 ? '...' : '');
+        console.log(`   ${item.table.padEnd(4)}: ${resultShort}`);
+    });
     
+    // Chạy auto update background
     autoUpdate();
     
-    var PORT = process.env.PORT || 5000;
-    app.listen(PORT, '0.0.0.0', function() {
-        console.log('\n🚀 API SERVER ĐANG CHẠY:');
-        console.log('   /api/vanhoa - Dự đoán tất cả bàn');
-        console.log('   /api/predict/1 - Dự đoán bàn cụ thể');
-        console.log('   /api/baccarat - Lịch sử');
-        console.log('\n⏰ Update mỗi 2 giây');
-        console.log('✅ Đã fix lỗi tách chuỗi result không dấu phẩy');
+    // Khởi động server
+    const PORT = process.env.PORT || 5000;
+    app.listen(PORT, '0.0.0.0', () => {
+        console.log(`\n🚀 API SERVER ĐANG CHẠY:`);
+        console.log(`   http://localhost:${PORT}/api/baccarat`);
+        console.log(`   http://localhost:${PORT}/api/baccarat/1`);
+        console.log(`   http://localhost:${PORT}/api/vanhoa - Dự đoán tất cả`);
+        console.log(`   http://localhost:${PORT}/api/vanhoa/C01 - Dự đoán bàn cụ thể`);
+        console.log(`   http://localhost:${PORT}/api/history/C01 - Lịch sử bàn`);
+        console.log(`   http://localhost:${PORT}/api/stats - Thống kê`);
+        console.log(`\n⏰ Auto update mỗi 2 giây`);
+        console.log(`\n📈 Hệ thống dự đoán đã sẵn sàng!`);
     });
 }
 
