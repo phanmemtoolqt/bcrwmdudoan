@@ -115,17 +115,24 @@ async function fetchBaccaratData() {
         var formData = new URLSearchParams();
         formData.append('gameCode', 'ae');
         var resp = await session.post(GETNEWRESULT_URL, formData.toString(), { headers: headers });
+        
         if (resp.data && resp.data.data) {
             baccaratData = resp.data.data.map(function(item) {
-                // Lấy số pattern từ chuỗi result
-                var rounds = item.result ? item.result.split(',').filter(function(r) { return r.trim() !== ''; }) : [];
+                // Lấy số pattern từ chuỗi result (VD: "B,P,B,P" -> 4 pattern)
+                var resultStr = item.result || '';
+                var rounds = resultStr.split(',').filter(function(r) { 
+                    return r.trim() !== '' && (r.trim() === 'B' || r.trim() === 'P' || r.trim() === 'T');
+                });
                 var totalPatterns = rounds.length;
+                
+                // Log để debug
+                console.log('Bàn ' + item.table_name + ': result="' + resultStr + '" -> ' + totalPatterns + ' patterns');
                 
                 return {
                     table: item.table_name,
                     result: item.result,
                     round: item.round || '',
-                    totalPatterns: totalPatterns // Lưu số pattern đã có
+                    totalPatterns: totalPatterns
                 };
             });
             lastUpdate = new Date().toISOString();
@@ -195,7 +202,9 @@ function analyzeSequence(sequence) {
 // THUẬT TOÁN DỰ ĐOÁN NÂNG CAO
 // ======================
 function advancedPrediction(history) {
-    var rounds = history ? history.split(',').filter(function(r) { return r.trim() !== ''; }) : [];
+    var rounds = history ? history.split(',').filter(function(r) { 
+        return r.trim() !== '' && (r.trim() === 'B' || r.trim() === 'P' || r.trim() === 'T');
+    }) : [];
     
     var analysis = {
         totalRounds: rounds.length,
@@ -517,7 +526,7 @@ function advancedPrediction(history) {
 }
 
 // ======================
-// CẬP NHẬT DỰ ĐOÁN - FIX PHIÊN DỰ ĐOÁN CHÍNH XÁC
+// CẬP NHẬT DỰ ĐOÁN
 // ======================
 function updatePredictions() {
     if (!baccaratData || baccaratData.length === 0) return;
@@ -525,10 +534,10 @@ function updatePredictions() {
     predictionData = baccaratData.map(function(table) {
         var analysis = advancedPrediction(table.result);
         
-        // Lấy số pattern từ dữ liệu đã lưu
+        // Lấy số pattern đã lưu từ fetch
         var totalPatterns = table.totalPatterns || 0;
         
-        // Phiên dự đoán = tổng số pattern đã có + 1
+        // Phiên dự đoán = tổng số pattern + 1
         var nextRound = totalPatterns + 1;
         
         return {
@@ -629,7 +638,7 @@ async function start() {
         console.log('   /api/predict/1 - Dự đoán bàn cụ thể');
         console.log('   /api/baccarat - Lịch sử');
         console.log('\n⏰ Update mỗi 2 giây');
-        console.log('✅ Phiên dự đoán = Tổng số pattern đã có + 1');
+        console.log('✅ Phiên dự đoán = Tổng số pattern + 1');
     });
 }
 
