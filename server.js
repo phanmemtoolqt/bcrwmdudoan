@@ -145,19 +145,31 @@ async function fetchBaccaratData() {
 // ======================================================
 function predictNext(resultString) {
     if (!resultString || resultString.length === 0) {
-        return { prediction: 'N/A', confidence: 0, pattern: 'Chưa có dữ liệu' };
+        return { 
+            prediction: 'N/A', 
+            confidence: 0, 
+            pattern: 'Chưa có dữ liệu',
+            total_pattern: 0
+        };
     }
 
-    const history = resultString.split(''); // ['B','P','B',...]
+    const history = resultString.split('');
     const total = history.length;
     
-    // Lấy 20 ván gần nhất (hoặc ít hơn nếu chuỗi ngắn)
+    // Lấy 20 ván gần nhất
     const recent = history.slice(-20);
     const len = recent.length;
-    if (len === 0) return { prediction: 'N/A', confidence: 0, pattern: 'Không đủ dữ liệu' };
+    if (len === 0) {
+        return { 
+            prediction: 'N/A', 
+            confidence: 0, 
+            pattern: 'Không đủ dữ liệu',
+            total_pattern: total
+        };
+    }
 
-    // Đếm tần suất có trọng số (ván càng gần trọng số càng cao)
-    const weights = recent.map((_, idx) => 1 + (idx / len) * 2); // trọng số từ 1 đến 3
+    // Đếm tần suất có trọng số
+    const weights = recent.map((_, idx) => 1 + (idx / len) * 2);
     const counts = { B: 0, P: 0, T: 0 };
     for (let i = 0; i < len; i++) {
         const ch = recent[i];
@@ -174,14 +186,13 @@ function predictNext(resultString) {
         }
     }
 
-    // Tính độ tin cậy = tỷ lệ điểm của dự đoán so với tổng điểm
+    // Tính độ tin cậy
     const totalScore = counts.B + counts.P + counts.T;
     let confidence = totalScore > 0 ? (maxScore / totalScore) * 100 : 0;
     confidence = Math.round(confidence);
 
     // Phân tích pattern
     let pattern = '';
-    // Kiểm tra chuỗi (streak)
     let streak = 1;
     for (let i = len - 1; i > 0; i--) {
         if (recent[i] === recent[i-1]) streak++;
@@ -191,7 +202,6 @@ function predictNext(resultString) {
     if (streak >= 3) {
         pattern = `${lastChar === 'B' ? 'Banker' : lastChar === 'P' ? 'Player' : 'Tie'} đang chuỗi ${streak}`;
     } else {
-        // Xem xu hướng chung
         const pCount = recent.filter(ch => ch === 'P').length;
         const bCount = recent.filter(ch => ch === 'B').length;
         const tCount = recent.filter(ch => ch === 'T').length;
@@ -207,7 +217,8 @@ function predictNext(resultString) {
     return {
         prediction: maxLabel,
         confidence: confidence,
-        pattern: pattern
+        pattern: pattern,
+        total_pattern: total
     };
 }
 
@@ -234,7 +245,7 @@ app.use((req, res, next) => {
 });
 
 // ----------------------
-// API LỊCH SỬ (giữ nguyên)
+// API LỊCH SỬ
 // ----------------------
 app.get('/api/baccarat', (req, res) => {
     res.json({
@@ -265,17 +276,18 @@ app.get('/api/latest', (req, res) => {
 });
 
 // ----------------------
-// 🧠 API DỰ ĐOÁN MỚI
+// 🧠 API DỰ ĐOÁN
 // ----------------------
 // Dự đoán cho tất cả bàn
 app.get('/api/predict', (req, res) => {
     const predictions = baccaratData.map(item => {
         const pred = predictNext(item.result);
         return {
-            table: item.table,
-            nextRound: item.result.length + 1, // phiên tiếp theo
-            prediction: pred.prediction,
-            confidence: pred.confidence,
+            tên_bàn: item.table,
+            tổng_pattern: pred.total_pattern,
+            phiên_dự_đoán: pred.total_pattern + 1, // pattern + 1
+            dự_đoán: pred.prediction,
+            độ_tin_cậy: pred.confidence,
             pattern: pred.pattern
         };
     });
@@ -298,10 +310,11 @@ app.get('/api/predict/:table', (req, res) => {
     res.json({
         success: true,
         data: {
-            table: found.table,
-            nextRound: found.result.length + 1,
-            prediction: pred.prediction,
-            confidence: pred.confidence,
+            tên_bàn: found.table,
+            tổng_pattern: pred.total_pattern,
+            phiên_dự_đoán: pred.total_pattern + 1, // pattern + 1
+            dự_đoán: pred.prediction,
+            độ_tin_cậy: pred.confidence,
             pattern: pred.pattern
         },
         lastUpdate: lastUpdate
@@ -336,7 +349,7 @@ async function start() {
     console.log('\n📊 DỰ ĐOÁN SƠ BỘ:');
     baccaratData.slice(0, 5).forEach(item => {
         const pred = predictNext(item.result);
-        console.log(`   ${item.table.padEnd(4)} -> Ván ${item.result.length+1}: ${pred.prediction} (${pred.confidence}%) - ${pred.pattern}`);
+        console.log(`   ${item.table.padEnd(4)} -> Phiên ${pred.total_pattern + 1}: ${pred.prediction} (${pred.confidence}%) - ${pred.pattern}`);
     });
     console.log('   ... (xem chi tiết tại /api/predict)');
     
