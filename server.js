@@ -178,6 +178,7 @@ function analyzeSequence(sequence) {
     }
     result.streaks.push({ type: currentType, length: currentStreak });
     
+    // Phân tích pattern
     for (var i = 0; i < sequence.length - 3; i++) {
         var pattern = sequence.slice(i, i + 4);
         result.patterns.push(pattern.join(''));
@@ -192,6 +193,7 @@ function analyzeSequence(sequence) {
 function advancedPrediction(history) {
     var rounds = history ? history.split(',').filter(function(r) { return r.trim() !== ''; }) : [];
     
+    // Khởi tạo các biến phân tích
     var analysis = {
         totalRounds: rounds.length,
         last10: rounds.slice(-10),
@@ -201,28 +203,40 @@ function advancedPrediction(history) {
         all: rounds
     };
     
+    // Phân tích từng khoảng
     var stats10 = analyzeSequence(analysis.last10);
     var stats20 = analyzeSequence(analysis.last20);
     var stats30 = analyzeSequence(analysis.last30);
     var stats50 = analyzeSequence(analysis.last50);
     var statsAll = analyzeSequence(analysis.all);
     
+    // Dự đoán dựa trên nhiều yếu tố
     var predictions = [];
     var confidenceScores = [];
     
     // 1. PHÂN TÍCH CẦU BỆT
+    var betPattern = false;
+    var betStrength = 0;
     if (rounds.length >= 3) {
         var last3 = rounds.slice(-3);
         if (last3.every(function(r) { return r === last3[0]; })) {
-            var strength = 85;
-            if (statsAll.maxConsecutiveB >= 5 || statsAll.maxConsecutiveP >= 5) strength = 90;
-            if (statsAll.maxConsecutiveB >= 8 || statsAll.maxConsecutiveP >= 8) strength = 95;
-            predictions.push({ type: 'Cầu bệt', value: last3[0], strength: strength });
-            confidenceScores.push(strength);
+            betPattern = true;
+            betStrength = 85;
+            // Tăng độ mạnh nếu bệt dài
+            if (statsAll.maxConsecutiveB >= 5 || statsAll.maxConsecutiveP >= 5) {
+                betStrength = 90;
+            }
+            if (statsAll.maxConsecutiveB >= 8 || statsAll.maxConsecutiveP >= 8) {
+                betStrength = 95;
+            }
+            predictions.push({ type: 'Cầu bệt', value: last3[0], strength: betStrength });
+            confidenceScores.push(betStrength);
         }
     }
     
     // 2. PHÂN TÍCH CẦU 1-1
+    var cau11Pattern = false;
+    var cau11Strength = 0;
     if (rounds.length >= 6) {
         var last6 = rounds.slice(-6);
         var check11 = true;
@@ -233,22 +247,26 @@ function advancedPrediction(history) {
             }
         }
         if (check11) {
-            var strength = 75;
+            cau11Pattern = true;
+            cau11Strength = 75;
+            // Kiểm tra cầu 1-1 đã kéo dài bao lâu
             var count = 0;
             for (var i = rounds.length - 1; i > 0; i--) {
                 if (rounds[i] !== rounds[i-1]) count++;
                 else break;
             }
-            if (count >= 5) strength = 80;
-            if (count >= 7) strength = 85;
+            if (count >= 5) cau11Strength = 80;
+            if (count >= 7) cau11Strength = 85;
             var lastChar = rounds[rounds.length - 1];
             var nextPredict = lastChar === 'B' ? 'P' : 'B';
-            predictions.push({ type: 'Cầu 1-1', value: nextPredict, strength: strength });
-            confidenceScores.push(strength);
+            predictions.push({ type: 'Cầu 1-1', value: nextPredict, strength: cau11Strength });
+            confidenceScores.push(cau11Strength);
         }
     }
     
     // 3. PHÂN TÍCH CẦU 2-2
+    var cau22Pattern = false;
+    var cau22Strength = 0;
     if (rounds.length >= 8) {
         var last8 = rounds.slice(-8);
         var check22 = true;
@@ -257,15 +275,18 @@ function advancedPrediction(history) {
             if (i + 2 < last8.length && last8[i] === last8[i+2]) { check22 = false; break; }
         }
         if (check22) {
-            var strength = 70;
+            cau22Pattern = true;
+            cau22Strength = 70;
             var lastChar = rounds[rounds.length - 1];
             var nextPredict = lastChar === 'B' ? 'P' : 'B';
-            predictions.push({ type: 'Cầu 2-2', value: nextPredict, strength: strength });
-            confidenceScores.push(strength);
+            predictions.push({ type: 'Cầu 2-2', value: nextPredict, strength: cau22Strength });
+            confidenceScores.push(cau22Strength);
         }
     }
     
     // 4. PHÂN TÍCH CẦU 3-2
+    var cau32Pattern = false;
+    var cau32Strength = 0;
     if (rounds.length >= 10) {
         var last10 = rounds.slice(-10);
         var check32 = false;
@@ -277,15 +298,18 @@ function advancedPrediction(history) {
             }
         }
         if (check32) {
-            var strength = 65;
+            cau32Pattern = true;
+            cau32Strength = 65;
             var lastChar = rounds[rounds.length - 1];
             var nextPredict = lastChar === 'B' ? 'P' : 'B';
-            predictions.push({ type: 'Cầu 3-2', value: nextPredict, strength: strength });
-            confidenceScores.push(strength);
+            predictions.push({ type: 'Cầu 3-2', value: nextPredict, strength: cau32Strength });
+            confidenceScores.push(cau32Strength);
         }
     }
     
     // 5. PHÂN TÍCH CẦU 2-3
+    var cau23Pattern = false;
+    var cau23Strength = 0;
     if (rounds.length >= 10) {
         var last10 = rounds.slice(-10);
         var check23 = false;
@@ -297,11 +321,12 @@ function advancedPrediction(history) {
             }
         }
         if (check23) {
-            var strength = 65;
+            cau23Pattern = true;
+            cau23Strength = 65;
             var lastChar = rounds[rounds.length - 1];
             var nextPredict = lastChar;
-            predictions.push({ type: 'Cầu 2-3', value: nextPredict, strength: strength });
-            confidenceScores.push(strength);
+            predictions.push({ type: 'Cầu 2-3', value: nextPredict, strength: cau23Strength });
+            confidenceScores.push(cau23Strength);
         }
     }
     
@@ -314,7 +339,9 @@ function advancedPrediction(history) {
         
         var bPercent = (bCount / total * 100);
         var pPercent = (pCount / total * 100);
+        var tPercent = (tCount / total * 100);
         
+        // Dự đoán dựa trên xác suất
         if (bPercent > 55) {
             predictions.push({ type: 'Xác suất cao', value: 'B', strength: Math.round(bPercent) });
             confidenceScores.push(Math.round(bPercent));
@@ -335,6 +362,7 @@ function advancedPrediction(history) {
             cycleAnalysis[key]++;
         }
         
+        // Tìm chu kỳ xuất hiện nhiều nhất
         var maxCycle = '';
         var maxCount = 0;
         for (var key in cycleAnalysis) {
@@ -359,7 +387,9 @@ function advancedPrediction(history) {
         var recent = rounds.slice(-15);
         var bRecent = recent.filter(function(r) { return r === 'B'; }).length;
         var pRecent = recent.filter(function(r) { return r === 'P'; }).length;
+        var tRecent = recent.filter(function(r) { return r === 'T'; }).length;
         
+        // Kiểm tra biến động đột biến
         var bRate = bRecent / recent.length * 100;
         var pRate = pRecent / recent.length * 100;
         
@@ -450,6 +480,60 @@ function advancedPrediction(history) {
         }
     }
     
+    // 13. PHÂN TÍCH NGƯỠNG
+    if (rounds.length >= 20) {
+        var bWin = 0, pWin = 0;
+        for (var i = 0; i < rounds.length - 1; i++) {
+            if (rounds[i] === 'B') bWin++;
+            else if (rounds[i] === 'P') pWin++;
+        }
+        
+        var bWinRate = bWin / (bWin + pWin) * 100;
+        var pWinRate = pWin / (bWin + pWin) * 100;
+        
+        if (bWinRate > 60) {
+            predictions.push({ type: 'Banker dominant', value: 'P', strength: 60 });
+            confidenceScores.push(60);
+        } else if (pWinRate > 60) {
+            predictions.push({ type: 'Player dominant', value: 'B', strength: 60 });
+            confidenceScores.push(60);
+        }
+    }
+    
+    // 14. PHÂN TÍCH TỶ LỆ VÀNG
+    if (rounds.length >= 30) {
+        var goldenRatio = 0.618;
+        var bRatio = statsAll.bank / statsAll.totalRounds;
+        var pRatio = statsAll.player / statsAll.totalRounds;
+        
+        if (Math.abs(bRatio - goldenRatio) < 0.05) {
+            predictions.push({ type: 'Golden ratio B', value: 'P', strength: 65 });
+            confidenceScores.push(65);
+        } else if (Math.abs(pRatio - goldenRatio) < 0.05) {
+            predictions.push({ type: 'Golden ratio P', value: 'B', strength: 65 });
+            confidenceScores.push(65);
+        }
+    }
+    
+    // 15. PHÂN TÍCH TRUNG BÌNH ĐỘNG
+    if (rounds.length >= 15) {
+        var last10B = rounds.slice(-10).filter(function(r) { return r === 'B'; }).length;
+        var last10P = rounds.slice(-10).filter(function(r) { return r === 'P'; }).length;
+        var last20B = rounds.slice(-20).filter(function(r) { return r === 'B'; }).length;
+        var last20P = rounds.slice(-20).filter(function(r) { return r === 'P'; }).length;
+        
+        var avg10 = last10B / 10;
+        var avg20 = last20B / 20;
+        
+        if (avg10 > avg20 + 0.1) {
+            predictions.push({ type: 'MA decreasing B', value: 'P', strength: 62 });
+            confidenceScores.push(62);
+        } else if (avg10 < avg20 - 0.1) {
+            predictions.push({ type: 'MA increasing B', value: 'B', strength: 62 });
+            confidenceScores.push(62);
+        }
+    }
+    
     // TỔNG HỢP VÀ CHỌN DỰ ĐOÁN TỐT NHẤT
     var finalPrediction = 'B';
     var finalConfidence = 50;
@@ -457,20 +541,26 @@ function advancedPrediction(history) {
     var bestScore = 0;
     
     if (predictions.length > 0) {
+        // Thống kê các dự đoán
+        var voteB = 0, voteP = 0;
         var weightedB = 0, weightedP = 0;
         
         for (var i = 0; i < predictions.length; i++) {
             var pred = predictions[i];
             if (pred.value === 'B') {
+                voteB++;
                 weightedB += pred.strength;
             } else if (pred.value === 'P') {
+                voteP++;
                 weightedP += pred.strength;
             }
         }
         
+        // Chọn dựa trên trọng số
         if (weightedB > weightedP) {
             finalPrediction = 'B';
             finalConfidence = Math.round((weightedB / (weightedB + weightedP)) * 100);
+            // Tìm pattern có độ tin cậy cao nhất
             for (var i = 0; i < predictions.length; i++) {
                 if (predictions[i].value === 'B' && predictions[i].strength > bestScore) {
                     bestScore = predictions[i].strength;
@@ -487,18 +577,21 @@ function advancedPrediction(history) {
                 }
             }
         } else {
+            // Nếu hòa, dùng kết quả cuối cùng
             var lastChar = rounds.length > 0 ? rounds[rounds.length - 1] : 'B';
             finalPrediction = lastChar === 'B' ? 'P' : 'B';
             finalConfidence = 55;
             finalPattern = 'Bẻ cầu khi hòa';
         }
     } else {
+        // Nếu không có pattern nào
         var lastChar = rounds.length > 0 ? rounds[rounds.length - 1] : 'B';
         finalPrediction = lastChar === 'B' ? 'P' : 'B';
         finalConfidence = 50;
         finalPattern = 'Dự đoán cơ bản';
     }
     
+    // Điều chỉnh độ tin cậy cuối cùng
     if (rounds.length > 30) finalConfidence += 5;
     if (rounds.length > 50) finalConfidence += 5;
     if (rounds.length > 100) finalConfidence += 5;
@@ -507,29 +600,33 @@ function advancedPrediction(history) {
     return {
         prediction: finalPrediction,
         confidence: finalConfidence,
-        pattern: finalPattern
+        pattern: finalPattern,
+        analysis: {
+            totalRounds: rounds.length,
+            bankCount: statsAll.bank,
+            playerCount: statsAll.player,
+            tieCount: statsAll.tie,
+            maxStreakB: statsAll.maxConsecutiveB,
+            maxStreakP: statsAll.maxConsecutiveP,
+            patternsFound: predictions.length,
+            detailedPredictions: predictions
+        }
     };
 }
 
 // ======================
-// CẬP NHẬT DỰ ĐOÁN - FIX PHIÊN DỰ ĐOÁN
+// CẬP NHẬT DỰ ĐOÁN
 // ======================
 function updatePredictions() {
     if (!baccaratData || baccaratData.length === 0) return;
     
     predictionData = baccaratData.map(function(table) {
         var analysis = advancedPrediction(table.result);
-        
-        // Đếm tổng số pattern trong lịch sử
         var rounds = table.result ? table.result.split(',').filter(function(r) { return r.trim() !== ''; }) : [];
-        var totalPatterns = rounds.length; // Tổng số pattern đã có
-        
-        // Phiên dự đoán = tổng số pattern + 1
-        var nextRound = totalPatterns + 1;
         
         return {
             table: table.table,
-            round: nextRound, // Phiên dự đoán = tổng số pattern đã có + 1
+            round: rounds.length + 1,
             prediction: analysis.prediction,
             confidence: analysis.confidence,
             pattern: analysis.pattern
@@ -558,6 +655,7 @@ app.use(function(req, res, next) {
     next();
 });
 
+// API dự đoán tất cả bàn
 app.get('/api/vanhoa', function(req, res) {
     res.json({
         success: true,
@@ -567,6 +665,7 @@ app.get('/api/vanhoa', function(req, res) {
     });
 });
 
+// API dự đoán bàn cụ thể
 app.get('/api/predict/:table', function(req, res) {
     var tableName = req.params.table;
     var found = null;
@@ -583,6 +682,7 @@ app.get('/api/predict/:table', function(req, res) {
     }
 });
 
+// API lịch sử
 app.get('/api/baccarat', function(req, res) {
     res.json({ success: true, data: baccaratData, lastUpdate: lastUpdate, total: baccaratData.length });
 });
@@ -592,7 +692,7 @@ app.get('/api/baccarat', function(req, res) {
 // ======================
 async function start() {
     console.log('========================================');
-    console.log('BACCARAT AI PREDICTION');
+    console.log('BACCARAT AI PREDICTION - ADVANCED ALGORITHM');
     console.log('========================================');
     console.log('[1] Đang đăng nhập...');
     var loginOk = await login();
@@ -625,8 +725,7 @@ async function start() {
         console.log('   /api/predict/1 - Dự đoán bàn cụ thể');
         console.log('   /api/baccarat - Lịch sử');
         console.log('\n⏰ Update mỗi 2 giây');
-        console.log('🧠 Thuật toán phân tích 12+ yếu tố');
-        console.log('✅ Phiên dự đoán = Tổng số pattern đã có + 1');
+        console.log('🧠 Thuật toán phân tích 15+ yếu tố khác nhau');
     });
 }
 
