@@ -17,8 +17,7 @@ const agent = new https.Agent({ rejectUnauthorized: false });
 let cookieJar = '';
 let baccaratData = [];
 let lastUpdate = null;
-let historicalData = {}; // Lưu lịch sử cho từng bàn
-let dataBuffer = []; // Buffer để lưu tất cả kết quả
+let historicalData = {};
 
 // ======================
 // SESSION AXIOS
@@ -34,7 +33,6 @@ const session = axios.create({
     }
 });
 
-// Interceptor lưu cookie
 session.interceptors.request.use(config => {
     if (cookieJar) config.headers.Cookie = cookieJar;
     return config;
@@ -54,17 +52,11 @@ session.interceptors.response.use(res => {
     return res;
 });
 
-// ======================
-// LẤY CSRF TOKEN
-// ======================
 function getCsrfToken(html) {
     const match = html.match(/<meta\s+name="csrf-token"\s+content="([^"]+)"/);
     return match ? match[1] : null;
 }
 
-// ======================
-// ĐĂNG NHẬP
-// ======================
 async function login() {
     try {
         const getResp = await session.get(LOGIN_URL);
@@ -90,9 +82,6 @@ async function login() {
     }
 }
 
-// ======================
-// VÀO LOBBY
-// ======================
 async function goToLobby() {
     try {
         await session.get(LOBBY_URL);
@@ -104,45 +93,26 @@ async function goToLobby() {
 }
 
 // ======================
-// PHÂN TÍCH PATTERN - CẢI TIẾN
+// PHÂN TÍCH PATTERN - CHỈ LẤY PATTERN
 // ======================
-function analyzePattern(history) {
+function getPattern(history) {
     if (!history || history.length < 5) {
-        return {
-            pattern: 'Chưa đủ dữ liệu',
-            confidence: 0,
-            suggestion: 'Cần ít nhất 5 kết quả để phân tích',
-            nextPrediction: 'N/A',
-            lastResults: 'Chưa có dữ liệu'
-        };
+        return 'Chưa đủ dữ liệu';
     }
 
-    // Chuyển đổi kết quả thành dạng chuỗi: B (Banker), P (Player), T (Tie)
     const results = history.map(r => {
-        const resultStr = String(r.result || r).toUpperCase();
+        const resultStr = String(r.result || '').toUpperCase();
         if (resultStr.includes('BANKER')) return 'B';
         if (resultStr.includes('PLAYER')) return 'P';
-        if (resultStr.includes('TIE') || resultStr.includes('T')) return 'T';
+        if (resultStr.includes('TIE')) return 'T';
         return '?';
     }).filter(r => r !== '?');
 
     if (results.length < 5) {
-        return {
-            pattern: 'Chưa đủ dữ liệu',
-            confidence: 0,
-            suggestion: 'Cần ít nhất 5 kết quả hợp lệ',
-            nextPrediction: 'N/A',
-            lastResults: results.join(' → ')
-        };
+        return 'Chưa đủ dữ liệu';
     }
 
-    let pattern = '';
-    let confidence = 0;
-    let nextPrediction = '';
-    let suggestion = '';
-    let foundPattern = false;
-
-    // 1. KIỂM TRA CẦU 1-1 (ĐAN XEN)
+    // 1. Cầu 1-1 (Đan xen)
     let isAlternating = true;
     for (let i = 1; i < results.length; i++) {
         if (results[i] === results[i-1] || results[i] === 'T' || results[i-1] === 'T') {
@@ -151,16 +121,133 @@ function analyzePattern(history) {
         }
     }
     if (isAlternating && results.length >= 4) {
-        pattern = '🏆 Cầu 1-1 (Đan xen)';
-        confidence = 80;
-        const last = results[results.length - 1];
-        nextPrediction = last === 'B' ? 'P' : 'B';
-        suggestion = '👉 THEO - Cầu đan xen đang mạnh';
-        foundPattern = true;
+        return 'Cầu 1-1 (Đan xen)';
     }
 
-    // 2. KIỂM TRA CẦU 2-2 (KÉP ĐÔI)
-    if (!foundPattern) {
+    // 2. Cầu 2-2 (Kép đôi)
+    let isDouble = true;
+    for (let i = 0; i < results.length - 1; i += 2) {
+        if (i + 1 < results.length) {
+            if (results[i] !== results[i+1] || results[i] === 'T') {
+                isDouble = false;
+                break;
+            }
+        }
+    }
+    if (isDouble && results.length >= 4) {
+        return 'Cầu 2-2 (Kép đôi)';
+    }
+
+    // 3. Cầu vượt (Streak)
+    let currentStreak = 1;
+    let maxStreak = 1;
+    let streakResult = results[0];
+    let current = 1;
+    
+    for (let i = 1; i < results.length; i++) {
+        if (results[i] === results[i-1] && results[i] !== 'T') {
+            current++;
+            if (current > maxStreak) {
+                maxStreak = current;
+                streakResult = results[i];
+            }
+        } else {
+            current = 1;
+        }
+    }
+    
+    if (maxStreak >= 3 && streakResult !== 'T') {
+        const name = streakResult === 'B' ? 'Banker' : 'Player';
+        return `Cầu vượt (${maxStreak} ${name})`;
+    }
+
+    // 4. Cầu lệch
+    const counts = { B: 0, P: 0, T: 0 };
+    results.forEach(r => {
+        if (r === 'B') counts.B++;
+        else if (r === 'P') counts.P++;
+        else if (r === 'T') counts.T++;
+    });
+    
+    const total = results.length;
+    const bRatio = counts.B / total;
+    const pRatio = counts.P / total;
+    const diff = Math.abs(bRatio - pRatio);
+    
+    if (diff > 0.25) {
+        if (bRatio > pRatio) {
+            return 'Cầu lệch (Banker)';
+        } else {
+            return 'Cầu lệch (Player)';
+        }
+    }
+
+    // 5. Cầu hỗn hợp
+    return 'Cầu hỗn hợp';
+}
+
+// ======================
+// DỰ ĐOÁN - CHỈ LẤY 5 THÔNG TIN
+// ======================
+function predict(tableName, history) {
+    if (!history || history.length < 5) {
+        return {
+            table: tableName,
+            round: 1,
+            prediction: 'N/A',
+            confidence: '0%',
+            pattern: 'Chưa đủ dữ liệu'
+        };
+    }
+
+    const results = history.map(r => {
+        const resultStr = String(r.result || '').toUpperCase();
+        if (resultStr.includes('BANKER')) return 'B';
+        if (resultStr.includes('PLAYER')) return 'P';
+        if (resultStr.includes('TIE')) return 'T';
+        return '?';
+    }).filter(r => r !== '?');
+
+    if (results.length < 5) {
+        return {
+            table: tableName,
+            round: history.length + 1,
+            prediction: 'N/A',
+            confidence: '0%',
+            pattern: 'Chưa đủ dữ liệu'
+        };
+    }
+
+    // Lấy pattern
+    const pattern = getPattern(history);
+
+    // Dự đoán và độ tin cậy
+    let prediction = 'B';
+    let confidence = 50;
+
+    // Phân tích để đưa ra dự đoán
+    const counts = { B: 0, P: 0, T: 0 };
+    results.forEach(r => {
+        if (r === 'B') counts.B++;
+        else if (r === 'P') counts.P++;
+        else if (r === 'T') counts.T++;
+    });
+
+    // Kiểm tra cầu đan xen
+    let isAlternating = true;
+    for (let i = 1; i < results.length; i++) {
+        if (results[i] === results[i-1] || results[i] === 'T' || results[i-1] === 'T') {
+            isAlternating = false;
+            break;
+        }
+    }
+    if (isAlternating && results.length >= 4) {
+        const last = results[results.length - 1];
+        prediction = last === 'B' ? 'P' : 'B';
+        confidence = 80;
+    }
+    // Kiểm tra cầu kép đôi
+    else {
         let isDouble = true;
         for (let i = 0; i < results.length - 1; i += 2) {
             if (i + 1 < results.length) {
@@ -171,184 +258,69 @@ function analyzePattern(history) {
             }
         }
         if (isDouble && results.length >= 4) {
-            pattern = '🏆 Cầu 2-2 (Kép đôi)';
-            confidence = 85;
             const last = results[results.length - 1];
-            nextPrediction = last === 'B' ? 'B' : 'P';
-            suggestion = '👉 THEO - Cầu kép đôi ổn định';
-            foundPattern = true;
+            prediction = last === 'B' ? 'B' : 'P';
+            confidence = 85;
         }
-    }
-
-    // 3. KIỂM TRA CẦU VƯỢT (STREAK)
-    if (!foundPattern) {
-        let currentStreak = 1;
-        let maxStreak = 1;
-        let streakResult = results[0];
-        let current = 1;
-        
-        for (let i = 1; i < results.length; i++) {
-            if (results[i] === results[i-1] && results[i] !== 'T') {
-                current++;
-                if (current > maxStreak) {
-                    maxStreak = current;
-                    streakResult = results[i];
+        // Kiểm tra cầu vượt
+        else {
+            let currentStreak = 1;
+            let maxStreak = 1;
+            let streakResult = results[0];
+            let current = 1;
+            
+            for (let i = 1; i < results.length; i++) {
+                if (results[i] === results[i-1] && results[i] !== 'T') {
+                    current++;
+                    if (current > maxStreak) {
+                        maxStreak = current;
+                        streakResult = results[i];
+                    }
+                } else {
+                    current = 1;
                 }
-            } else {
-                current = 1;
+            }
+            
+            if (maxStreak >= 3 && streakResult !== 'T') {
+                prediction = streakResult;
+                confidence = Math.min(75 + maxStreak * 3, 95);
+            }
+            // Dự đoán theo thống kê
+            else {
+                const bRatio = counts.B / results.length;
+                const pRatio = counts.P / results.length;
+                
+                if (bRatio > pRatio) {
+                    prediction = 'B';
+                    confidence = Math.round(50 + (bRatio - pRatio) * 100);
+                } else if (pRatio > bRatio) {
+                    prediction = 'P';
+                    confidence = Math.round(50 + (pRatio - bRatio) * 100);
+                } else {
+                    prediction = 'B';
+                    confidence = 55;
+                }
+                
+                if (confidence > 90) confidence = 90;
+                if (confidence < 50) confidence = 50;
             }
         }
-        
-        if (maxStreak >= 3 && streakResult !== 'T') {
-            const name = streakResult === 'B' ? 'Banker' : 'Player';
-            pattern = `🏆 Cầu vượt (${maxStreak} ${name})`;
-            confidence = Math.min(75 + maxStreak * 3, 95);
-            nextPrediction = streakResult;
-            suggestion = `👉 THEO - Cầu vượt mạnh, tiếp tục theo ${name}`;
-            foundPattern = true;
-        }
     }
 
-    // 4. KIỂM TRA CẦU LỆCH (THỐNG KÊ)
-    if (!foundPattern) {
-        const counts = { B: 0, P: 0, T: 0 };
-        results.forEach(r => {
-            if (r === 'B') counts.B++;
-            else if (r === 'P') counts.P++;
-            else if (r === 'T') counts.T++;
-        });
-        
-        const total = results.length;
-        const bRatio = counts.B / total;
-        const pRatio = counts.P / total;
-        const diff = Math.abs(bRatio - pRatio);
-        
-        if (diff > 0.25) {
-            pattern = '📊 Cầu lệch (Thống kê)';
-            confidence = 70;
-            if (bRatio > pRatio) {
-                nextPrediction = 'B';
-                suggestion = `👉 THEO - Banker ${(bRatio*100).toFixed(1)}% đang chiếm ưu thế`;
-            } else {
-                nextPrediction = 'P';
-                suggestion = `👉 THEO - Player ${(pRatio*100).toFixed(1)}% đang chiếm ưu thế`;
-            }
-            foundPattern = true;
-        }
-    }
-
-    // 5. NẾU KHÔNG CÓ PATTERN RÕ RÀNG - DỰ ĐOÁN THEO XÁC SUẤT
-    if (!foundPattern) {
-        const counts = { B: 0, P: 0, T: 0 };
-        results.forEach(r => {
-            if (r === 'B') counts.B++;
-            else if (r === 'P') counts.P++;
-            else if (r === 'T') counts.T++;
-        });
-        
-        const total = results.length;
-        const bRatio = counts.B / total;
-        const pRatio = counts.P / total;
-        
-        pattern = '🔄 Cầu hỗn hợp';
-        confidence = 55;
-        
-        if (bRatio > pRatio) {
-            nextPrediction = 'B';
-            suggestion = `⚖️ BẺ - Cầu đang phức tạp, ưu tiên Banker (${(bRatio*100).toFixed(1)}%)`;
-        } else if (pRatio > bRatio) {
-            nextPrediction = 'P';
-            suggestion = `⚖️ BẺ - Cầu đang phức tạp, ưu tiên Player (${(pRatio*100).toFixed(1)}%)`;
-        } else {
-            nextPrediction = 'B';
-            suggestion = '⚖️ BẺ - Cầu cân bằng, chọn Banker (tỷ lệ thắng cao hơn)';
-        }
-    }
-
-    // Lấy 10 kết quả gần nhất để hiển thị
-    const last10 = results.slice(-10);
-    const lastResultsStr = last10.join(' → ');
+    // Phiên dự đoán = tổng số kết quả + 1
+    const round = history.length + 1;
 
     return {
-        pattern,
-        confidence: Math.min(Math.round(confidence), 95),
-        suggestion,
-        nextPrediction,
-        lastResults: lastResultsStr,
-        stats: {
-            B: results.filter(r => r === 'B').length,
-            P: results.filter(r => r === 'P').length,
-            T: results.filter(r => r === 'T').length,
-            total: results.length
-        }
+        table: tableName,
+        round: round,
+        prediction: prediction,
+        confidence: confidence + '%',
+        pattern: pattern
     };
 }
 
 // ======================
-// TẠO DỰ ĐOÁN CHO PHIÊN TIẾP THEO
-// ======================
-function generatePrediction(tableName, history) {
-    if (!history || history.length < 5) {
-        return {
-            tableName: tableName,
-            round: 1,
-            prediction: 'N/A',
-            confidence: 0,
-            pattern: 'Chưa đủ dữ liệu',
-            suggestion: 'Cần ít nhất 5 kết quả để phân tích',
-            reliability: 'Không đủ dữ liệu',
-            sampleCount: history ? history.length : 0,
-            lastResults: 'Chưa có dữ liệu',
-            timestamp: new Date().toISOString(),
-            status: 'Đang thu thập dữ liệu...'
-        };
-    }
-
-    const analysis = analyzePattern(history);
-    
-    // Xác định độ tin cậy dựa trên số lượng mẫu và confidence
-    let reliability = 'Thấp';
-    if (history.length >= 20 && analysis.confidence >= 75) {
-        reliability = 'Cao 🟢';
-    } else if (history.length >= 10 && analysis.confidence >= 60) {
-        reliability = 'Trung bình 🟡';
-    } else if (history.length >= 5 && analysis.confidence >= 40) {
-        reliability = 'Thấp 🟠';
-    } else {
-        reliability = 'Chưa đủ 🟢';
-    }
-
-    // Lấy phiên hiện tại
-    let currentRound = 0;
-    if (history && history.length > 0) {
-        const lastItem = history[history.length - 1];
-        if (lastItem.round) {
-            currentRound = parseInt(lastItem.round) || 0;
-        } else {
-            // Nếu không có round, dùng index
-            currentRound = history.length;
-        }
-    }
-    const nextRound = currentRound + 1;
-
-    return {
-        tableName: tableName,
-        round: nextRound,
-        prediction: analysis.nextPrediction,
-        confidence: analysis.confidence + '%',
-        pattern: analysis.pattern,
-        suggestion: analysis.suggestion,
-        reliability: reliability,
-        sampleCount: history.length,
-        lastResults: analysis.lastResults || 'Chưa có dữ liệu',
-        stats: analysis.stats || {},
-        timestamp: new Date().toISOString(),
-        status: '✅ Sẵn sàng'
-    };
-}
-
-// ======================
-// LẤY KẾT QUẢ BACCARAT - CẢI TIẾN LƯU LỊCH SỬ
+// LẤY KẾT QUẢ BACCARAT
 // ======================
 async function fetchBaccaratData() {
     try {
@@ -377,25 +349,19 @@ async function fetchBaccaratData() {
                 round: item.round || String(Date.now())
             }));
 
-            // Cập nhật dữ liệu hiện tại
             baccaratData = newData;
             
-            // LƯU LỊCH SỬ CHO TỪNG BÀN
             newData.forEach(item => {
                 const tableName = item.table;
-                
-                // Khởi tạo nếu chưa có
                 if (!historicalData[tableName]) {
                     historicalData[tableName] = [];
                 }
                 
-                // Kiểm tra xem đã có kết quả này chưa (tránh duplicate)
                 const exists = historicalData[tableName].some(
                     h => h.result === item.result && h.round === item.round
                 );
                 
                 if (!exists) {
-                    // Thêm vào lịch sử
                     historicalData[tableName].push({
                         result: item.result,
                         round: item.round,
@@ -403,23 +369,14 @@ async function fetchBaccaratData() {
                         timestamp: new Date().toISOString()
                     });
                     
-                    // Giữ tối đa 50 kết quả gần nhất
                     if (historicalData[tableName].length > 50) {
                         historicalData[tableName] = historicalData[tableName].slice(-50);
                     }
                 }
             });
 
-            // Cập nhật buffer tổng
-            dataBuffer = dataBuffer.concat(newData);
-            if (dataBuffer.length > 500) {
-                dataBuffer = dataBuffer.slice(-500);
-            }
-
             lastUpdate = new Date().toISOString();
-            
-            // Log để debug
-            console.log(`[${new Date().toLocaleTimeString()}] Đã cập nhật ${newData.length} bàn, tổng lịch sử: ${Object.keys(historicalData).length} bàn`);
+            console.log(`[${new Date().toLocaleTimeString()}] Đã cập nhật ${newData.length} bàn`);
         }
         
         return baccaratData;
@@ -429,20 +386,10 @@ async function fetchBaccaratData() {
     }
 }
 
-// ======================
-// VÒNG LẶP TỰ ĐỘNG CẬP NHẬT
-// ======================
 async function autoUpdate() {
-    let count = 0;
     while (true) {
         try {
             await fetchBaccaratData();
-            count++;
-            if (count % 10 === 0) {
-                // Mỗi 20 giây log trạng thái
-                const totalHistory = Object.values(historicalData).reduce((sum, arr) => sum + arr.length, 0);
-                console.log(`📊 Tổng dữ liệu: ${Object.keys(historicalData).length} bàn, ${totalHistory} kết quả`);
-            }
         } catch (error) {
             console.error('Auto update error:', error.message);
         }
@@ -496,22 +443,20 @@ app.get('/api/latest', (req, res) => {
 });
 
 // ======================
-// API DỰ ĐOÁN - CẢI TIẾN
+// API DỰ ĐOÁN - CHỈ 5 THÔNG TIN
 // ======================
 
-// Dự đoán cho tất cả bàn
+// Dự đoán cho tất cả bàn - CHỈ 5 THÔNG TIN
 app.get('/api/vanhoa', (req, res) => {
     try {
         const predictions = [];
         const tables = Object.keys(historicalData);
         
-        console.log(`🔮 Đang dự đoán cho ${tables.length} bàn...`);
-        
         tables.forEach(tableName => {
             const history = historicalData[tableName] || [];
             if (history.length >= 5) {
-                const prediction = generatePrediction(tableName, history);
-                predictions.push(prediction);
+                const result = predict(tableName, history);
+                predictions.push(result);
             }
         });
         
@@ -524,25 +469,20 @@ app.get('/api/vanhoa', (req, res) => {
         
         res.json({
             success: true,
-            totalTables: predictions.length,
-            totalTablesWithData: tables.length,
+            total: predictions.length,
             predictions: predictions,
-            timestamp: new Date().toISOString(),
-            message: predictions.length > 0 
-                ? `✅ Dự đoán thành công ${predictions.length}/${tables.length} bàn` 
-                : '⏳ Đang thu thập dữ liệu, vui lòng đợi 1-2 phút...'
+            timestamp: new Date().toISOString()
         });
     } catch (error) {
         console.error('Prediction error:', error);
         res.status(500).json({
             success: false,
-            error: error.message,
-            message: 'Lỗi hệ thống dự đoán'
+            error: error.message
         });
     }
 });
 
-// Dự đoán cho bàn cụ thể
+// Dự đoán cho bàn cụ thể - CHỈ 5 THÔNG TIN
 app.get('/api/vanhoa/:table', (req, res) => {
     try {
         const tableName = req.params.table;
@@ -552,15 +492,14 @@ app.get('/api/vanhoa/:table', (req, res) => {
             return res.json({
                 success: false,
                 message: `Chưa đủ dữ liệu cho bàn ${tableName}. Cần ít nhất 5 kết quả.`,
-                currentData: history.length,
-                status: 'Đang thu thập dữ liệu...'
+                current: history.length
             });
         }
         
-        const prediction = generatePrediction(tableName, history);
+        const result = predict(tableName, history);
         res.json({
             success: true,
-            prediction: prediction,
+            prediction: result,
             timestamp: new Date().toISOString()
         });
     } catch (error) {
@@ -586,61 +525,12 @@ app.get('/api/history/:table', (req, res) => {
     });
 });
 
-// API thống kê
-app.get('/api/stats', (req, res) => {
-    const stats = {};
-    const tables = Object.keys(historicalData);
-    
-    tables.forEach(tableName => {
-        const history = historicalData[tableName] || [];
-        const results = history.map(h => String(h.result || '').toUpperCase());
-        const banker = results.filter(r => r.includes('BANKER')).length;
-        const player = results.filter(r => r.includes('PLAYER')).length;
-        const tie = results.filter(r => r.includes('TIE')).length;
-        
-        stats[tableName] = {
-            total: results.length,
-            banker: banker,
-            player: player,
-            tie: tie,
-            bankerPercent: results.length > 0 ? ((banker / results.length) * 100).toFixed(1) + '%' : '0%',
-            playerPercent: results.length > 0 ? ((player / results.length) * 100).toFixed(1) + '%' : '0%',
-            tiePercent: results.length > 0 ? ((tie / results.length) * 100).toFixed(1) + '%' : '0%'
-        };
-    });
-    
-    res.json({
-        success: true,
-        stats: stats,
-        totalTables: tables.length,
-        timestamp: new Date().toISOString()
-    });
-});
-
-// API dashboard - Tổng quan
-app.get('/api/dashboard', (req, res) => {
-    const tables = Object.keys(historicalData);
-    let totalResults = 0;
-    tables.forEach(t => {
-        totalResults += historicalData[t].length;
-    });
-    
-    res.json({
-        success: true,
-        totalTables: tables.length,
-        totalResults: totalResults,
-        lastUpdate: lastUpdate,
-        tables: tables,
-        status: '🟢 Hệ thống đang hoạt động'
-    });
-});
-
 // ======================
 // KHỞI ĐỘNG
 // ======================
 async function start() {
     console.log('========================================');
-    console.log('🃏 BACCARAT API SERVER + DỰ ĐOÁN PRO');
+    console.log('🃏 BACCARAT DỰ ĐOÁN PRO');
     console.log('========================================');
     
     console.log('[1] 🔐 Đang đăng nhập...');
@@ -659,52 +549,21 @@ async function start() {
     await fetchBaccaratData();
     console.log(`[OK] ✅ Đã lấy ${baccaratData.length} bàn`);
     
-    // Hiển thị danh sách bàn và lịch sử
-    console.log('\n📊 DANH SÁCH BÀN VÀ DỮ LIỆU:');
-    const tables = Object.keys(historicalData);
-    if (tables.length > 0) {
-        tables.forEach(table => {
-            const history = historicalData[table] || [];
-            console.log(`   ${table.padEnd(6)}: ${history.length} kết quả`);
-            if (history.length > 0) {
-                const last = history[history.length - 1];
-                console.log(`      ➜ Gần nhất: ${last.result}`);
-            }
-        });
-    } else {
-        console.log('   ⏳ Đang thu thập dữ liệu...');
-    }
-    
     console.log(`\n📈 TỔNG QUAN:`);
     console.log(`   - Số bàn: ${Object.keys(historicalData).length}`);
     console.log(`   - Tổng kết quả: ${Object.values(historicalData).reduce((sum, arr) => sum + arr.length, 0)}`);
     
-    // Chạy auto update background
     autoUpdate();
     
-    // Khởi động server
     const PORT = process.env.PORT || 5000;
     app.listen(PORT, '0.0.0.0', () => {
         console.log(`\n🚀 API SERVER ĐANG CHẠY:`);
         console.log(`   📍 http://localhost:${PORT}`);
-        console.log(`\n🔮 CÁC API DỰ ĐOÁN:`);
-        console.log(`   📊 /api/vanhoa        - Dự đoán TẤT CẢ bàn`);
-        console.log(`   🎯 /api/vanhoa/C01    - Dự đoán bàn cụ thể`);
-        console.log(`   📈 /api/history/C01   - Lịch sử bàn`);
-        console.log(`   📊 /api/stats         - Thống kê chi tiết`);
-        console.log(`   📋 /api/dashboard     - Tổng quan hệ thống`);
-        console.log(`\n⏰ Auto update mỗi 2 giây`);
+        console.log(`\n🔮 DỰ ĐOÁN (CHỈ 5 THÔNG TIN):`);
+        console.log(`   📊 /api/vanhoa        - Tất cả bàn`);
+        console.log(`   🎯 /api/vanhoa/C01    - Bàn cụ thể`);
         console.log(`\n✅ HỆ THỐNG SẴN SÀNG!`);
     });
 }
-
-// Bắt lỗi toàn cục
-process.on('uncaughtException', (error) => {
-    console.error('❌ Uncaught Exception:', error);
-});
-
-process.on('unhandledRejection', (error) => {
-    console.error('❌ Unhandled Rejection:', error);
-});
 
 start();
