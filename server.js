@@ -16,6 +16,7 @@ const PASSWORD = "123456";
 const agent = new https.Agent({ rejectUnauthorized: false });
 let cookieJar = '';
 let baccaratData = [];
+let predictionData = [];
 let lastUpdate = null;
 
 // ======================
@@ -131,6 +132,9 @@ async function fetchBaccaratData() {
                 round: item.round || ''
             }));
             lastUpdate = new Date().toISOString();
+            
+            // Cập nhật dự đoán
+            updatePredictions();
         }
         
         return baccaratData;
@@ -140,86 +144,258 @@ async function fetchBaccaratData() {
     }
 }
 
-// ======================================================
-// 🧠 THUẬT TOÁN DỰ ĐOÁN
-// ======================================================
-function predictNext(resultString) {
-    if (!resultString || resultString.length === 0) {
-        return { 
-            prediction: 'N/A', 
-            confidence: 0, 
-            pattern: 'Chưa có dữ liệu',
-            total_pattern: 0
-        };
-    }
-
-    const history = resultString.split('');
-    const total = history.length;
+// ======================
+// THUẬT TOÁN DỰ ĐOÁN BACCARAT
+// ======================
+function analyzePatterns(result) {
+    const patterns = [];
+    let totalWeight = 0;
     
-    // Lấy 20 ván gần nhất
-    const recent = history.slice(-20);
-    const len = recent.length;
-    if (len === 0) {
-        return { 
-            prediction: 'N/A', 
-            confidence: 0, 
-            pattern: 'Không đủ dữ liệu',
-            total_pattern: total
+    // Loại bỏ ký tự 'T' (Tie) khỏi kết quả để phân tích
+    const cleanResult = result.replace(/T/g, '');
+    
+    if (cleanResult.length < 3) {
+        return { prediction: 'Không đủ dữ liệu', confidence: 0, patterns: [], nextRound: 1 };
+    }
+    
+    // Lấy 20 kết quả gần nhất để phân tích
+    const recentResults = cleanResult.slice(-20);
+    const lastResult = cleanResult.slice(-1);
+    
+    // 1. Pattern Cầu Bệt (Streak) - trọng số cao nhất
+    const streakPattern = analyzeStreak(recentResults);
+    if (streakPattern) {
+        patterns.push(streakPattern);
+        totalWeight += streakPattern.weight;
+    }
+    
+    // 2. Pattern Cầu 1-1 (Ziczac/Single)
+    const ziczacPattern = analyzeZiczac(recentResults);
+    if (ziczacPattern) {
+        patterns.push(ziczacPattern);
+        totalWeight += ziczacPattern.weight;
+    }
+    
+    // 3. Pattern Cầu 2-2
+    const doublePattern = analyzeDouble(recentResults);
+    if (doublePattern) {
+        patterns.push(doublePattern);
+        totalWeight += doublePattern.weight;
+    }
+    
+    // 4. Pattern Cầu 3-3
+    const triplePattern = analyzeTriple(recentResults);
+    if (triplePattern) {
+        patterns.push(triplePattern);
+        totalWeight += triplePattern.weight;
+    }
+    
+    // 5. Pattern Cầu Nghiêng (một bên)
+    const biasPattern = analyzeBias(recentResults);
+    if (biasPattern) {
+        patterns.push(biasPattern);
+        totalWeight += biasPattern.weight;
+    }
+    
+    // Tính toán dự đoán cuối cùng
+    let bankerVotes = 0;
+    let playerVotes = 0;
+    
+    patterns.forEach(p => {
+        if (p.prediction === 'B') {
+            bankerVotes += p.weight;
+        } else if (p.prediction === 'P') {
+            playerVotes += p.weight;
+        }
+    });
+    
+    let finalPrediction;
+    let confidence;
+    
+    if (bankerVotes > playerVotes) {
+        finalPrediction = 'Banker (B)';
+        confidence = Math.min(95, Math.round((bankerVotes / totalWeight) * 100));
+    } else if (playerVotes > bankerVotes) {
+        finalPrediction = 'Player (P)';
+        confidence = Math.min(95, Math.round((playerVotes / totalWeight) * 100));
+    } else {
+        // Hòa vote - dùng xác suất thống kê
+        const totalGames = cleanResult.length;
+        const bankerCount = (cleanResult.match(/B/g) || []).length;
+        const playerCount = (cleanResult.match(/P/g) || []).length;
+        
+        if (bankerCount > playerCount) {
+            finalPrediction = 'Banker (B)';
+            confidence = 55;
+        } else if (playerCount > bankerCount) {
+            finalPrediction = 'Player (P)';
+            confidence = 55;
+        } else {
+            finalPrediction = 'Banker (B) - Không chắc chắn';
+            confidence = 50;
+        }
+    }
+    
+    // Xác định phiên dự đoán tiếp theo
+    const currentRound = cleanResult.length;
+    const nextRound = currentRound + 1;
+    
+    return {
+        prediction: finalPrediction,
+        confidence: confidence,
+        patterns: patterns,
+        nextRound: nextRound
+    };
+}
+
+// Phân tích cầu bệt (Streak)
+function analyzeStreak(results) {
+    const lastResults = results.slice(-5);
+    let streakCount = 1;
+    const streakDirection = lastResults[lastResults.length - 1];
+    
+    for (let i = lastResults.length - 2; i >= 0; i--) {
+        if (lastResults[i] === streakDirection) {
+            streakCount++;
+        } else {
+            break;
+        }
+    }
+    
+    if (streakCount >= 3) {
+        return {
+            name: 'Cầu Bệt',
+            detail: `${streakDirection} liên tiếp ${streakCount} lần`,
+            prediction: streakDirection,
+            weight: 8 + streakCount // Bệt càng dài trọng số càng cao
         };
     }
+    return null;
+}
 
-    // Đếm tần suất có trọng số
-    const weights = recent.map((_, idx) => 1 + (idx / len) * 2);
-    const counts = { B: 0, P: 0, T: 0 };
-    for (let i = 0; i < len; i++) {
-        const ch = recent[i];
-        if (counts[ch] !== undefined) counts[ch] += weights[i];
-    }
-
-    // Tìm kết quả có điểm cao nhất
-    let maxLabel = 'B';
-    let maxScore = 0;
-    for (const [label, score] of Object.entries(counts)) {
-        if (score > maxScore) {
-            maxScore = score;
-            maxLabel = label;
-        }
-    }
-
-    // Tính độ tin cậy
-    const totalScore = counts.B + counts.P + counts.T;
-    let confidence = totalScore > 0 ? (maxScore / totalScore) * 100 : 0;
-    confidence = Math.round(confidence);
-
-    // Phân tích pattern
-    let pattern = '';
-    let streak = 1;
-    for (let i = len - 1; i > 0; i--) {
-        if (recent[i] === recent[i-1]) streak++;
-        else break;
-    }
-    const lastChar = recent[len-1];
-    if (streak >= 3) {
-        pattern = `${lastChar === 'B' ? 'Banker' : lastChar === 'P' ? 'Player' : 'Tie'} đang chuỗi ${streak}`;
-    } else {
-        const pCount = recent.filter(ch => ch === 'P').length;
-        const bCount = recent.filter(ch => ch === 'B').length;
-        const tCount = recent.filter(ch => ch === 'T').length;
-        if (pCount > bCount && pCount > tCount) {
-            pattern = `Player chiếm ưu thế (${Math.round(pCount/len*100)}%)`;
-        } else if (bCount > pCount && bCount > tCount) {
-            pattern = `Banker chiếm ưu thế (${Math.round(bCount/len*100)}%)`;
+// Phân tích cầu 1-1 (Ziczac)
+function analyzeZiczac(results) {
+    const lastResults = results.slice(-5);
+    let ziczacCount = 0;
+    
+    for (let i = lastResults.length - 1; i > 0; i--) {
+        if (lastResults[i] !== lastResults[i - 1]) {
+            ziczacCount++;
         } else {
-            pattern = `Cầu đan xen (B:${bCount} P:${pCount} T:${tCount})`;
+            break;
         }
     }
+    
+    if (ziczacCount >= 3) {
+        const nextPrediction = lastResults[lastResults.length - 1] === 'B' ? 'P' : 'B';
+        return {
+            name: 'Cầu 1-1 (Ziczac)',
+            detail: `So le ${ziczacCount + 1} lần liên tiếp`,
+            prediction: nextPrediction,
+            weight: 7 + ziczacCount
+        };
+    }
+    return null;
+}
 
-    return {
-        prediction: maxLabel,
-        confidence: confidence,
-        pattern: pattern,
-        total_pattern: total
-    };
+// Phân tích cầu 2-2
+function analyzeDouble(results) {
+    const lastResults = results.slice(-6);
+    let pattern = [];
+    
+    // Nhóm thành các cặp
+    for (let i = 0; i < lastResults.length - 1; i += 2) {
+        if (lastResults[i] === lastResults[i + 1]) {
+            pattern.push(lastResults[i] + lastResults[i + 1]);
+        } else {
+            break;
+        }
+    }
+    
+    if (pattern.length >= 2) {
+        const lastPair = pattern[pattern.length - 1];
+        const nextPrediction = lastPair[0] === 'B' ? 'P' : 'B';
+        return {
+            name: 'Cầu 2-2',
+            detail: `Mỗi bên ${2} lần, đã lặp ${pattern.length} lần`,
+            prediction: nextPrediction,
+            weight: 6 + pattern.length
+        };
+    }
+    return null;
+}
+
+// Phân tích cầu 3-3
+function analyzeTriple(results) {
+    const lastResults = results.slice(-9);
+    let tripleCount = 0;
+    let currentStreak = 1;
+    let streakType = lastResults[lastResults.length - 1];
+    
+    for (let i = lastResults.length - 2; i >= 0; i--) {
+        if (lastResults[i] === streakType) {
+            currentStreak++;
+        } else {
+            if (currentStreak === 3) tripleCount++;
+            currentStreak = 1;
+            streakType = lastResults[i];
+        }
+    }
+    
+    if (tripleCount >= 2 && currentStreak < 3) {
+        return {
+            name: 'Cầu 3-3',
+            detail: `Mỗi bên ${3} lần, đã xuất hiện ${tripleCount} lần`,
+            prediction: lastResults[lastResults.length - 1],
+            weight: 5 + tripleCount
+        };
+    }
+    return null;
+}
+
+// Phân tích cầu nghiêng (Bias)
+function analyzeBias(results) {
+    const totalB = (results.match(/B/g) || []).length;
+    const totalP = (results.match(/P/g) || []).length;
+    const total = results.length;
+    
+    const bPercent = (totalB / total) * 100;
+    const pPercent = (totalP / total) * 100;
+    
+    if (Math.abs(bPercent - pPercent) >= 15) {
+        const biasDirection = bPercent > pPercent ? 'B' : 'P';
+        const biasPercent = Math.max(bPercent, pPercent);
+        return {
+            name: 'Cầu Nghiêng',
+            detail: `${biasDirection} chiếm ${biasPercent.toFixed(1)}% (tổng ${total} kết quả)`,
+            prediction: biasDirection,
+            weight: 4
+        };
+    }
+    return null;
+}
+
+// Cập nhật tất cả dự đoán
+function updatePredictions() {
+    predictionData = baccaratData.map(item => {
+        const analysis = analyzePatterns(item.result);
+        const currentRound = item.result.replace(/T/g, '').length;
+        
+        return {
+            table: item.table,
+            currentRound: currentRound,
+            nextRound: analysis.nextRound,
+            prediction: analysis.prediction,
+            confidence: analysis.confidence + '%',
+            patterns: analysis.patterns.map(p => ({
+                name: p.name,
+                detail: p.detail,
+                prediction: p.prediction
+            })),
+            totalPatterns: analysis.patterns.length,
+            result: item.result.slice(-20) // Kết quả gần nhất
+        };
+    });
 }
 
 // ======================
@@ -237,16 +413,17 @@ async function autoUpdate() {
 // ======================
 const app = express();
 
-// CORS
+// CORS cho phép gọi từ frontend
 app.use((req, res, next) => {
     res.header('Access-Control-Allow-Origin', '*');
     res.header('Access-Control-Allow-Headers', '*');
     next();
 });
 
-// ----------------------
+// ======================
 // API LỊCH SỬ
-// ----------------------
+// ======================
+// API lấy tất cả bàn
 app.get('/api/baccarat', (req, res) => {
     res.json({
         success: true,
@@ -256,9 +433,11 @@ app.get('/api/baccarat', (req, res) => {
     });
 });
 
+// API lấy theo bàn cụ thể
 app.get('/api/baccarat/:table', (req, res) => {
     const tableName = req.params.table;
     const found = baccaratData.find(item => item.table === tableName);
+    
     if (found) {
         res.json({ success: true, data: found });
     } else {
@@ -266,6 +445,7 @@ app.get('/api/baccarat/:table', (req, res) => {
     }
 });
 
+// API lấy kết quả mới nhất
 app.get('/api/latest', (req, res) => {
     const latest = [...baccaratData].sort((a, b) => {
         const numA = parseInt(a.table) || 0;
@@ -275,48 +455,46 @@ app.get('/api/latest', (req, res) => {
     res.json({ success: true, data: latest.slice(0, 10), lastUpdate: lastUpdate });
 });
 
-// ----------------------
-// 🧠 API DỰ ĐOÁN
-// ----------------------
-// Dự đoán cho tất cả bàn
-app.get('/api/predict', (req, res) => {
-    const predictions = baccaratData.map(item => {
-        const pred = predictNext(item.result);
-        return {
-            tên_bàn: item.table,
-            tổng_pattern: pred.total_pattern,
-            phiên_dự_đoán: pred.total_pattern + 1, // pattern + 1
-            dự_đoán: pred.prediction,
-            độ_tin_cậy: pred.confidence,
-            pattern: pred.pattern
-        };
-    });
+// ======================
+// API DỰ ĐOÁN
+// ======================
+// API lấy tất cả dự đoán
+app.get('/api/predictions', (req, res) => {
     res.json({
         success: true,
-        data: predictions,
+        data: predictionData,
         lastUpdate: lastUpdate,
-        total: predictions.length
+        total: predictionData.length
     });
 });
 
-// Dự đoán cho một bàn cụ thể
-app.get('/api/predict/:table', (req, res) => {
+// API lấy dự đoán theo bàn
+app.get('/api/predictions/:table', (req, res) => {
     const tableName = req.params.table;
-    const found = baccaratData.find(item => item.table === tableName);
-    if (!found) {
-        return res.json({ success: false, message: 'Không tìm thấy bàn ' + tableName });
+    const found = predictionData.find(item => item.table === tableName);
+    
+    if (found) {
+        res.json({ success: true, data: found });
+    } else {
+        res.json({ success: false, message: 'Không tìm thấy bàn ' + tableName });
     }
-    const pred = predictNext(found.result);
+});
+
+// API lấy top dự đoán có độ tin cậy cao nhất
+app.get('/api/predictions/top/:limit', (req, res) => {
+    const limit = parseInt(req.params.limit) || 5;
+    const sorted = [...predictionData]
+        .sort((a, b) => {
+            const confA = parseInt(a.confidence);
+            const confB = parseInt(b.confidence);
+            return confB - confA;
+        })
+        .slice(0, limit);
+    
     res.json({
         success: true,
-        data: {
-            tên_bàn: found.table,
-            tổng_pattern: pred.total_pattern,
-            phiên_dự_đoán: pred.total_pattern + 1, // pattern + 1
-            dự_đoán: pred.prediction,
-            độ_tin_cậy: pred.confidence,
-            pattern: pred.pattern
-        },
+        data: sorted,
+        message: `Top ${limit} dự đoán có độ tin cậy cao nhất`,
         lastUpdate: lastUpdate
     });
 });
@@ -326,7 +504,7 @@ app.get('/api/predict/:table', (req, res) => {
 // ======================
 async function start() {
     console.log('========================================');
-    console.log('BACCARAT API SERVER + DỰ ĐOÁN');
+    console.log('BACCARAT API SERVER - LỊCH SỬ & DỰ ĐOÁN');
     console.log('========================================');
     
     console.log('[1] Đang đăng nhập...');
@@ -345,13 +523,19 @@ async function start() {
     await fetchBaccaratData();
     console.log(`[OK] Đã lấy ${baccaratData.length} bàn`);
     
-    // Hiển thị danh sách bàn và dự đoán mẫu
-    console.log('\n📊 DỰ ĐOÁN SƠ BỘ:');
-    baccaratData.slice(0, 5).forEach(item => {
-        const pred = predictNext(item.result);
-        console.log(`   ${item.table.padEnd(4)} -> Phiên ${pred.total_pattern + 1}: ${pred.prediction} (${pred.confidence}%) - ${pred.pattern}`);
+    // Hiển thị dự đoán mẫu
+    console.log('\n📊 DỰ ĐOÁN MẪU (5 bàn đầu tiên):');
+    predictionData.slice(0, 5).forEach(item => {
+        console.log(`\n   Bàn ${item.table}:`);
+        console.log(`   - Phiên hiện tại: ${item.currentRound}`);
+        console.log(`   - Phiên dự đoán: ${item.nextRound}`);
+        console.log(`   - Dự đoán: ${item.prediction}`);
+        console.log(`   - Độ tin cậy: ${item.confidence}`);
+        console.log(`   - Số pattern phát hiện: ${item.totalPatterns}`);
+        item.patterns.forEach(p => {
+            console.log(`     + ${p.name}: ${p.detail} -> Dự đoán: ${p.prediction}`);
+        });
     });
-    console.log('   ... (xem chi tiết tại /api/predict)');
     
     // Chạy auto update background
     autoUpdate();
@@ -360,10 +544,15 @@ async function start() {
     const PORT = 5000;
     app.listen(PORT, '0.0.0.0', () => {
         console.log(`\n🚀 API SERVER ĐANG CHẠY:`);
-        console.log(`   📜 Lịch sử: http://localhost:${PORT}/api/baccarat`);
-        console.log(`   🔮 Dự đoán tất cả: http://localhost:${PORT}/api/predict`);
-        console.log(`   🔮 Dự đoán 1 bàn: http://localhost:${PORT}/api/predict/1`);
-        console.log(`   🕒 Cập nhật mỗi 2 giây`);
+        console.log(`\n📜 LỊCH SỬ:`);
+        console.log(`   http://localhost:${PORT}/api/baccarat`);
+        console.log(`   http://localhost:${PORT}/api/baccarat/1`);
+        console.log(`   http://localhost:${PORT}/api/latest`);
+        console.log(`\n🔮 DỰ ĐOÁN:`);
+        console.log(`   http://localhost:${PORT}/api/predictions`);
+        console.log(`   http://localhost:${PORT}/api/predictions/1`);
+        console.log(`   http://localhost:${PORT}/api/predictions/top/5`);
+        console.log(`\n⏰ Auto update mỗi 2 giây`);
     });
 }
 
